@@ -729,7 +729,6 @@ def serve(remote_poll_s=3.0):
             "ts": now_ms,
             "settings": {
                 "contextWindows": windows,
-                "contextBaselinePct": cfg_now.get("context_baseline_pct", 25),
             },
         }
         print(json.dumps(out, ensure_ascii=False), flush=True)

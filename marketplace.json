@@ -14,7 +14,7 @@
         "zh-CN": "Tokmon：ZCode token 用量与生成速率监控（本地 + SSH 远程）。核心零侵入，可选悬浮状态条。",
         "en": "Tokmon: ZCode token usage & generation-rate monitor (local + SSH remote). Zero-intrusion core, optional status bar."
       },
-      "version": "1.1.7",
+      "version": "1.1.8",
       "author": {
         "name": "EV12138"
       },

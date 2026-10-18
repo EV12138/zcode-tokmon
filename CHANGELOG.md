@@ -2,6 +2,12 @@
 
 All notable changes to Tokmon are documented here.
 
+## 1.1.8 — 2026-10-18
+
+- Context colors now use the actual usage percentage; the 25% baseline is gone.
+- 45% now shows chartreuse (正常) instead of green, matching the displayed number.
+- `context_baseline_pct` is removed from the default config and the data payload.
+
 ## 1.1.7 — 2026-10-18
 
 - Rate and context tooltips now explain color tiers with swatches: each level shows a color block, its name and range, with the current tier highlighted.

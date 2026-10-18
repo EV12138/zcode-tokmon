@@ -28,6 +28,5 @@
   "context_windows": {
     "glm-5.3": 1000000
   },
-  "context_window_default": 0,
-  "context_baseline_pct": 25
+  "context_window_default": 0
 }

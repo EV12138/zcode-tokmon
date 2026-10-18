@@ -177,19 +177,6 @@
       })
     };
   }
-  /* 上下文占用率起算点：默认 25%（前 25% 不计入），可在 config 覆盖 */
-  function contextBaseline() {
-    var st = (payload && payload.settings) || {};
-    var v = st.contextBaselinePct;
-    if (v == null) return 25;
-    v = Number(v);
-    return (isNaN(v) || v < 0 || v >= 100) ? 0 : v;
-  }
-  function contextUsagePct(rawPct, base) {
-    if (rawPct == null || isNaN(rawPct)) return null;
-    if (!base) return rawPct;
-    return Math.max(0, Math.min(100, (rawPct - base) * 100.0 / (100 - base)));
-  }
 
   /* ---------- DOM 骨架 ---------- */
   var CSS = (
@@ -469,11 +456,8 @@
     var today = (isRemote && view.hostToday) ? view.hostToday : (loc.today || {});
     var ctxWin = contextWindowFor(cur && cur.model);
     var ctxRawPct = (ctxWin && cur && cur.context) ? cur.context * 100.0 / ctxWin : null;
-    var ctxBase = contextBaseline();
-    var ctxPct = contextUsagePct(ctxRawPct, ctxBase);
-    var ctxPctR = (ctxPct == null) ? null : Math.round(ctxPct);
     var ctxRawR = (ctxRawPct == null) ? null : Math.round(ctxRawPct);
-    var ctxTone = contextTone(ctxPctR);   // 与显示值一致
+    var ctxTone = contextTone(ctxRawR);   // 颜色按实际占用率分级
     var remotes = remoteList();
     var remoteToday = 0, remoteOk = 0, remoteErr = 0, remoteCache = 0, remoteInput = 0;
     remotes.forEach(function (r) {
@@ -514,8 +498,7 @@
       addRow(srcSec, "会话", (cur.title || cur.sid.slice(0, 16)) + " · " + fmtTok(cur.totalTokens || cur.total) +
         " tok" + (cur.cacheHitRate == null ? "" : " · 命中 " + fmtPct(cur.cacheHitRate)));
       addRow(srcSec, "上下文长度", cur.context
-        ? fmtTok(cur.context) + (ctxWin ? " / " + fmtTok(ctxWin) + " · " + ctxRawR + "%" +
-          (ctxBase ? "（颜色按 " + ctxBase + "% 起算：" + ctxPctR + "%）" : "") : "") +
+        ? fmtTok(cur.context) + (ctxWin ? " / " + fmtTok(ctxWin) + " · " + ctxRawR + "%" : "") +
           " tok" + (ctxWin ? " · " + ctxTone.label : "")
         : "暂无完成请求");
       addRow(srcSec, "缓存命中 / 模型", fmtPct(cur.cacheHitRate) + " · " + (cur.model || "—"));
@@ -661,24 +644,19 @@
     var ctxModel = mine ? mine.model : (cur && cur.model);
     var ctxWin = contextWindowFor(ctxModel);
     var ctxRawPct = (ctxWin && ctxVal) ? ctxVal * 100.0 / ctxWin : null;
-    var ctxBase = contextBaseline();
-    var ctxPct = contextUsagePct(ctxRawPct, ctxBase);
-    var ctxPctR = (ctxPct == null) ? null : Math.round(ctxPct);
     var ctxRawR = (ctxRawPct == null) ? null : Math.round(ctxRawPct);
-    var ct = contextTone(ctxPctR);   // 与显示值一致，避免 70% 显示黄绿之类的边界错位
+    var ct = contextTone(ctxRawR);   // 颜色按实际占用率分级，避免 45% 仍显示绿色
     if (hasSession) {
       var ctxTip = ["上下文长度",
         "当前会话最近一次完成请求的输入 token 数（含缓存读），也是下一轮请求的基础上下文。",
         "当前 " + (ctxVal ? fmtTok(ctxVal) + " tok" : "暂无完成请求") +
-          (ctxWin ? " / " + fmtTok(ctxWin) + "（实际 " + ctxRawR + "%" +
-            (ctxBase ? "；颜色按 " + ctxBase + "% 起算 → " + ctxPctR + "%" : "") + "）" : "") +
+          (ctxWin ? " / " + fmtTok(ctxWin) + "（" + ctxRawR + "%）" : "") +
           (ctxModel ? " · 模型 " + ctxModel : ""),
         ctxWin ? "占用等级（颜色分级）：" + ct.label : "未匹配到模型窗口，仅显示绝对值。",
-        ctxBase ? "数字为实际占用率；颜色分级从 " + ctxBase + "% 起算（不影响数字，可在 config 调整）。" : "颜色按实际占用率分级。",
+        "数字与颜色分级都按实际占用率计算。",
         "会话压缩后会自动回落；显示 — 表示还没有完成的请求。"].filter(function (x) { return x; });
       if (ctxWin) {
-        ctxTip.push(tierLegend(CONTEXT_TIERS, ct.label,
-          ctxBase ? "颜色分级值（按 " + ctxBase + "% 起算）" : "颜色分级值"));
+        ctxTip.push(tierLegend(CONTEXT_TIERS, ct.label, "颜色分级（实际占用率）"));
       }
       if (mine && mine.running) ctxTip.push("⚡ 生成中，完成后更新。");
       setGroup(ui.ctx, ctxVal ? fmtTok(ctxVal) : "—",
