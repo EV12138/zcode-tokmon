@@ -40,6 +40,20 @@ def tool_token_monitor(scope="now"):
             agent.fmt_tok(t["cache_read"]), agent.fmt_tok(t["cache_write"]), t["requests"])
     if scope == "week":
         return agent.render_days(7)
+    if scope == "models" or scope.startswith("models:"):
+        days = int(scope.split(":", 1)[1]) if ":" in scope else 7
+        con = agent.connect()
+        try:
+            return agent.render_models(agent.q_models(con, days), days)
+        finally:
+            con.close()
+    if scope == "recent" or scope.startswith("recent:"):
+        n = int(scope.split(":", 1)[1]) if ":" in scope else 10
+        con = agent.connect()
+        try:
+            return agent.render_recent(agent.q_recent(con, n))
+        finally:
+            con.close()
     if scope.startswith("days:"):
         return agent.render_days(max(1, min(90, int(scope.split(":", 1)[1]))))
     if scope == "sessions":
@@ -60,7 +74,8 @@ def tool_token_monitor(scope="now"):
         return cli.render_remote()
     if scope == "all":
         return cli.render_all()
-    return ("未知 scope: %r。可用: now | today | week | days:N | sessions | remote | all" % scope)
+    return ("未知 scope: %r。可用: now | today | week | days:N | sessions | "
+            "models[:days] | recent[:N] | remote | all" % scope)
 
 
 TOOLS = [
@@ -70,7 +85,8 @@ TOOLS = [
             "查询 ZCode 的 token 用量与生成速率（只读 db.sqlite；remote/all 会通过 SSH 查询远程主机，"
             "首次查询自动部署远端 agent，约需数秒）。"
             "scope 可选: now(当前会话+今日+速率,默认), today, week, days:N(近N天), "
-            "sessions(活跃会话), remote(所有 SSH 远程主机的用量/速率), all(本地+远程汇总)。"
+            "sessions(活跃会话), models[:days](按模型聚合+缓存命中+平均TTFT), "
+            "recent[:N](最近N次完成请求明细), remote(所有 SSH 远程主机的用量/速率), all(本地+远程汇总)。"
             "速率口径: output_tokens ÷ 生成时长（思考段从 started_at 起算），加权聚合。"
         ),
         "inputSchema": {
