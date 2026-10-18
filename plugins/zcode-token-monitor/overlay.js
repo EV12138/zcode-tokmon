@@ -109,6 +109,32 @@
   function mySessionSid(composer) {
     return sessIdOf(composer) || activeSid || "";
   }
+  /* 模型上下文窗口：数据泵已按 ZCode 模型目录解析，按模型 id 精确/最长子串匹配 */
+  function contextWindowFor(model) {
+    if (!model) return 0;
+    var wins = (payload && payload.settings && payload.settings.contextWindows) || {};
+    var m = String(model).toLowerCase();
+    if (wins[model] != null) return Number(wins[model]) || 0;
+    var best = 0, bestLen = -1;
+    for (var k in wins) {
+      var key = String(k).toLowerCase();
+      if (key && m.indexOf(key) >= 0 && key.length > bestLen) {
+        best = Number(wins[k]) || 0;
+        bestLen = key.length;
+      }
+    }
+    return best;
+  }
+  function fmtPct(v) {
+    return (v == null || isNaN(v)) ? "—" : (Math.round(v * 10) / 10) + "%";
+  }
+  /* 缓存命中率：cache_read / input；input 为 0 时返回 null（不显示单位） */
+  function hitPct(cache, input) {
+    return input ? (cache || 0) * 100.0 / input : null;
+  }
+  function hitUnit(p) {
+    return (p == null || isNaN(p)) ? "" : "· " + fmtPct(p);
+  }
 
   /* ---------- DOM 骨架 ---------- */
   var CSS = (
@@ -356,17 +382,32 @@
     var cur = (view && view.sess) || loc.current || null;
     var isRemote = !!(view && view.src);
     var today = (isRemote && view.hostToday) ? view.hostToday : (loc.today || {});
+    var ctxWin = contextWindowFor(cur && cur.model);
+    var ctxPct = (ctxWin && cur && cur.context) ? Math.round(cur.context * 100.0 / ctxWin) : 0;
     var remotes = remoteList();
-    var remoteToday = 0, remoteOk = 0, remoteErr = 0;
+    var remoteToday = 0, remoteOk = 0, remoteErr = 0, remoteCache = 0, remoteInput = 0;
     remotes.forEach(function (r) {
-      if (r.ok) { remoteOk++; remoteToday += ((r.data || {}).today || {}).total || 0; }
-      else remoteErr++;
+      if (r.ok) {
+        remoteOk++;
+        var rt = (r.data || {}).today || {};
+        remoteToday += rt.total || 0;
+        remoteCache += rt.cache_read || 0;
+        remoteInput += rt.input || 0;
+      } else remoteErr++;
     });
     var localToday = (loc.today || {}).total || 0;
+    var localTodayCache = (loc.today || {}).cache_read || 0;
+    var localTodayInput = (loc.today || {}).input || 0;
+    var allHit = hitPct(localTodayCache + remoteCache, localTodayInput + remoteInput);
+    var todayHit = hitPct(today.cache_read, today.input);
 
     panel.appendChild(el("h4", null, "全部今日（本机 + SSH 远程）"));
-    addRow(panel, "合计", fmtTok(localToday + remoteToday) + " tok");
+    addRow(panel, "合计", fmtTok(localToday + remoteToday) + " tok" +
+      (allHit == null ? "" : " · 命中 " + fmtPct(allHit)));
     addRow(panel, "构成", "本机 " + fmtTok(localToday) + " · 远程 " + fmtTok(remoteToday));
+    addRow(panel, "缓存命中", fmtPct(allHit) + "（本机 " +
+      fmtPct(hitPct(localTodayCache, localTodayInput)) + " · 远程 " +
+      fmtPct(hitPct(remoteCache, remoteInput)) + "）");
     addRow(panel, "远程可达", remotes.length
       ? remoteOk + " / " + remotes.length + " 台" + (remoteErr ? "（失败未计入）" : "")
       : "未配置");
@@ -376,11 +417,16 @@
     srcSec.appendChild(el("h4", null, isRemote
       ? "当前会话 · ☁ " + (view.src.label || view.src.host)
       : "当前会话 · 本机"));
-    addRow(srcSec, "本数据源今日", fmtTok(today.total) + " tok（" + (today.requests || 0) + " 次请求）");
+    addRow(srcSec, "本数据源今日", fmtTok(today.total) + " tok（" + (today.requests || 0) +
+      " 次请求）" + (todayHit == null ? "" : " · 命中 " + fmtPct(todayHit)));
     if (cur) {
       var r0 = cur.rate || {};
-      addRow(srcSec, "会话", (cur.title || cur.sid.slice(0, 16)) + " · " + fmtTok(cur.totalTokens || cur.total) + " tok");
-      addRow(srcSec, "上下文长度", cur.context ? fmtTok(cur.context) + " tok" : "暂无完成请求");
+      addRow(srcSec, "会话", (cur.title || cur.sid.slice(0, 16)) + " · " + fmtTok(cur.totalTokens || cur.total) +
+        " tok" + (cur.cacheHitRate == null ? "" : " · 命中 " + fmtPct(cur.cacheHitRate)));
+      addRow(srcSec, "上下文长度", cur.context
+        ? fmtTok(cur.context) + (ctxWin ? " / " + fmtTok(ctxWin) + " · " + ctxPct + "%" : "") + " tok"
+        : "暂无完成请求");
+      addRow(srcSec, "缓存命中 / 模型", fmtPct(cur.cacheHitRate) + " · " + (cur.model || "—"));
       addRow(srcSec, "会话速率", "最近加权 " + fmtTps(r0.tps) + " · 峰值 " + fmtTps(r0.peak) + " tok/s");
       if (cur.turnRate) {
         addRow(srcSec, "上一轮", fmtTps(cur.turnRate.tps) + " tok/s（" + fmtTok(cur.turnRate.ratedOutput || 0) + " tok）");
@@ -400,7 +446,8 @@
         sec.appendChild(head);
         if (r.ok) {
           var d = r.data || {}, t = d.today || {}, dc = d.current || null;
-          addRow(sec, "  今日", fmtTok(t.total) + " tok（" + (t.requests || 0) + " 次）");
+          addRow(sec, "  今日", fmtTok(t.total) + " tok（" + (t.requests || 0) + " 次）" +
+            (t.input ? " · 命中 " + fmtPct(hitPct(t.cache_read, t.input)) : ""));
           if (dc) addRow(sec, "  当前会话", fmtTok(dc.total) + " tok · " + fmtTps((dc.rate || {}).tps) + " tok/s");
           var dl = d.delta;
           if (dl && dl.requests) addRow(sec, "  窗口速率", fmtTps(dl.tps) + " tok/s（" + dl.requests + " 次完成）");
@@ -492,15 +539,16 @@
     /* 会话累计 + 上下文长度 */
     var hasSession = !!(mine || cur);
     if (mine) {
-      setGroup(ui.session, fmtTok(mine.totalTokens), "", {
+      setGroup(ui.session, fmtTok(mine.totalTokens), hitUnit(mine.cacheHitRate), {
         tip: ["本会话累计",
           "当前会话累计消耗的 token（输入 + 输出，含历史上下文；不含子代理，子代理为独立会话）。",
-          "来源：" + mineTag + " · " + (mine.requests || 0) + " 次请求",
+          "来源：" + mineTag + " · " + (mine.requests || 0) + " 次请求 · 模型 " + (mine.model || "—"),
+          "缓存命中 " + fmtPct(mine.cacheHitRate) + "（cache read / input）",
           mine.running ? "状态：⚡ 生成中 " + (mine.runningElapsedSec || 0) + "s"
                        : "状态：idle " + (mine.idleSec || 0) + "s"]
       });
     } else if (cur) {
-      setGroup(ui.session, fmtTok(cur.total), "", {
+      setGroup(ui.session, fmtTok(cur.total), hitUnit(cur.cacheHitRate), {
         tip: ["最近活跃会话",
           "最近活跃会话「" + (cur.title || cur.sid.slice(0, 16)) + "」累计消耗的 token。",
           "上下文 " + fmtTok(cur.context) + " · " + cur.requests + " 次请求",
@@ -512,14 +560,25 @@
     ui.sep2.style.display = hasSession ? "" : "none";
 
     var ctxVal = mine ? (mine.context || 0) : ((cur && cur.context) || 0);
+    var ctxModel = mine ? mine.model : (cur && cur.model);
+    var ctxWin = contextWindowFor(ctxModel);
+    var ctxPct = (ctxWin && ctxVal) ? Math.round(ctxVal * 100.0 / ctxWin) : 0;
     if (hasSession) {
-      setGroup(ui.ctx, ctxVal ? fmtTok(ctxVal) : "—", "", {
-        tip: ["上下文长度",
-          "当前会话最近一次完成请求的输入 token 数（含缓存读），也是下一轮请求的基础上下文。",
-          "当前 " + (ctxVal ? fmtTok(ctxVal) + " tok" : "暂无完成请求") +
-            (mine && mine.running ? " · ⚡ 生成中，完成后更新" : ""),
-          "会话压缩后会自动回落；显示 — 表示还没有完成的请求。"]
-      });
+      var ctxTip = ["上下文长度",
+        "当前会话最近一次完成请求的输入 token 数（含缓存读），也是下一轮请求的基础上下文。",
+        "当前 " + (ctxVal ? fmtTok(ctxVal) + " tok" : "暂无完成请求") +
+          (ctxWin ? " / " + fmtTok(ctxWin) + "（" + ctxPct + "%）" : "") +
+          (ctxModel ? " · 模型 " + ctxModel : ""),
+        ctxWin ? "达到 80% 显示黄色、95% 显示红色；窗口来自 ZCode 模型目录，可在配置里覆盖。"
+               : "未匹配到模型窗口，仅显示绝对值。",
+        "会话压缩后会自动回落；显示 — 表示还没有完成的请求。"];
+      if (mine && mine.running) ctxTip.push("⚡ 生成中，完成后更新。");
+      setGroup(ui.ctx, ctxVal ? fmtTok(ctxVal) : "—",
+        ctxWin && ctxVal ? "· " + ctxPct + "%" : "", {
+          warn: !!(ctxWin && ctxPct >= 80 && ctxPct < 95),
+          err: !!(ctxWin && ctxPct >= 95),
+          tip: ctxTip
+        });
       ui.ctx.g.style.display = "";
       ui.sep3.style.display = "";
     } else {
@@ -528,35 +587,46 @@
     }
 
     /* 今日：跟随会话所在数据源 */
-    setGroup(ui.today, fmtTok(today.total), "", {
+    var todayHit = hitPct(today.cache_read, today.input);
+    setGroup(ui.today, fmtTok(today.total), hitUnit(todayHit), {
       tip: ["今日总量",
         (isRemote ? "远端主机 " + srcName + " 今日" : "本机今日") +
           "（本地零点起）所有会话合计（含子代理），含输入、输出与缓存读取。",
         "输入 " + fmtTok(today.input) + " · 输出 " + fmtTok(today.output) +
           " · 缓存读 " + fmtTok(today.cache_read),
-        (today.requests || 0) + " 次请求"]
+        "缓存命中 " + fmtPct(todayHit) + " · " + (today.requests || 0) + " 次请求"]
     });
 
     /* 全部今日 = 本机今日 + 所有可达 SSH 远程今日 */
     var remotes = remoteList();
     var remoteToday = 0, remoteOk = 0, remoteErr = 0, bestTps = 0, errTxt = "";
+    var remoteCache = 0, remoteInput = 0;
     remotes.forEach(function (r) {
       if (r.ok) {
         remoteOk++;
         var rd = r.data || {};
-        remoteToday += (rd.today || {}).total || 0;
+        var rt = rd.today || {};
+        remoteToday += rt.total || 0;
+        remoteCache += rt.cache_read || 0;
+        remoteInput += rt.input || 0;
         var dl0 = rd.delta;
         var t0 = (dl0 && dl0.requests && dl0.tps) || ((rd.current || {}).rate || {}).tps || 0;
         if (t0 > bestTps) bestTps = t0;
       } else { remoteErr++; if (!errTxt) errTxt = String(r.error || ""); }
     });
     var localToday = (loc.today || {}).total || 0;
+    var localTodayCache = (loc.today || {}).cache_read || 0;
+    var localTodayInput = (loc.today || {}).input || 0;
+    var allHit = hitPct(localTodayCache + remoteCache, localTodayInput + remoteInput);
     var allTip = ["今日总量（全部）",
       "本机今日 + 所有可达 SSH 远程主机今日的 token 合计（含子代理与缓存读取）。",
       "构成：本机 " + fmtTok(localToday) + " · 远程 " + fmtTok(remoteToday) +
-        (remotes.length ? "（" + remoteOk + "/" + remotes.length + " 台可达）" : "（未配置远程）")];
+        (remotes.length ? "（" + remoteOk + "/" + remotes.length + " 台可达）" : "（未配置远程）"),
+      "缓存命中 " + fmtPct(allHit) + "（本机 " +
+        fmtPct(hitPct(localTodayCache, localTodayInput)) + " · 远程 " +
+        fmtPct(hitPct(remoteCache, remoteInput)) + "）"];
     if (remoteErr) allTip.push("有 " + remoteErr + " 台远程查询失败，未计入合计。");
-    setGroup(ui.allToday, fmtTok(localToday + remoteToday), "", {
+    setGroup(ui.allToday, fmtTok(localToday + remoteToday), hitUnit(allHit), {
       warn: remoteErr > 0,
       tip: allTip
     });
