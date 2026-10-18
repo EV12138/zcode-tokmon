@@ -1,6 +1,6 @@
 ---
 description: 查询 ZCode token 用量与生成速率（本地 + SSH 远程主机）
-argument-hint: "[now|today|week|days:N|sessions|remote|all]"
+argument-hint: "[now|today|week|days:N|sessions|models[:days]|recent[:N]|remote|all]"
 ---
 
 查询 ZCode token 用量与速率，把工具返回的报表原样整理后回复用户；用户要详细表格时用完整数值（带千分位），不要自行缩写或编造数字。
@@ -14,6 +14,8 @@ $ARGUMENTS 到 scope 的映射（为空默认 now）：
 - "today" / "今日" → `today`
 - "week" / "近N天" → `week` 或 `days:N`
 - "sessions" / "活跃会话" → `sessions`
+- "models" / "按模型" / "模型用量" → `models[:days]`（默认 7 天；含缓存命中率与平均 TTFT）
+- "recent" / "最近请求" / "请求明细" → `recent[:N]`（默认 10 条；含模型、TTFT、重试、工具调用、速率）
 - "remote" / "远程" / "服务器" → `remote`（SSH 查询所有远程主机，首次会自动部署远端 agent，约需数秒，提前告知用户）
 - "all" / "全部" → `all`（本地 + 远程汇总）
 
