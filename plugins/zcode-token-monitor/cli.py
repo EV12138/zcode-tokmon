@@ -3,7 +3,7 @@
 """token monitor CLI —— 查询本地/远程用量与速率，也是 /usage 命令的兜底通道。
 
 子命令：
-  now | today | week | days:N | sessions | remote | all | watch
+  now | today | week | days:N | sessions | models[:days] | recent[:N] | remote | all | watch
   remote/all 会触发 SSH 查询（自动部署远端 agent、ControlMaster 复用）。
 """
 import os
@@ -117,6 +117,20 @@ def main(argv=None):
                 print("%s%s [%s] 总%s · 最近 %s tok/s · %s" % (
                     s.get("title") or s.get("sid", "")[:16], sub, s.get("directory") or "—",
                     agent.fmt_tok(s.get("totalTokens")), agent.fmt_tps(s.get("lastTps")), state))
+        finally:
+            con.close()
+    elif cmd == "models":
+        days = int(rest[0]) if rest and str(rest[0]).isdigit() else 7
+        con = agent.connect()
+        try:
+            print(agent.render_models(agent.q_models(con, days), days))
+        finally:
+            con.close()
+    elif cmd == "recent":
+        n = int(rest[0]) if rest and str(rest[0]).isdigit() else 10
+        con = agent.connect()
+        try:
+            print(agent.render_recent(agent.q_recent(con, n)))
         finally:
             con.close()
     elif cmd == "remote":
