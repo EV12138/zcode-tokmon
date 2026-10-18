@@ -1,0 +1,38 @@
+name: tests
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  unit-tests:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: ["3.9", "3.11", "3.12"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+      - name: Rate semantics
+        run: python tests/test_rate.py
+      - name: Data layer
+        run: python tests/test_data.py
+
+  syntax:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Python syntax
+        run: python -m py_compile plugins/zcode-token-monitor/*.py
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+      - name: JS syntax
+        run: |
+          node --check plugins/zcode-token-monitor/overlay.js
+          node --check plugins/zcode-token-monitor/inject-main.cjs
