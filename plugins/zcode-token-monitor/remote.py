@@ -232,8 +232,7 @@ def ensure_agent(target, cfg, force=False):
     argv = target.base_argv(persist) + ["cat > %s/agent.py && chmod 644 %s/agent.py"
                                        % (REMOTE_AGENT_DIR, REMOTE_AGENT_DIR)]
     try:
-        p = subprocess.run(argv, input=body, capture_output=True, timeout=timeout + 8,
-                           stdin=subprocess.PIPE)
+        p = subprocess.run(argv, input=body, capture_output=True, timeout=timeout + 8)
         if p.returncode != 0:
             return False, "deploy failed rc=%d: %s" % (p.returncode, (p.stderr or b"")[:160].decode("utf-8", "replace"))
     except subprocess.TimeoutExpired:
