@@ -126,6 +126,13 @@ def aggregate_rate(rows):
     }
 
 
+def cache_hit_rate(cache_read, input_tokens):
+    """缓存命中率（%）：cache_read / input；input 已含 cache read。"""
+    if not input_tokens:
+        return 0.0
+    return round((cache_read or 0) * 100.0 / input_tokens, 1)
+
+
 def last_valid_tps(rows):
     """最近一次有效完成请求的速率；first_token 缺失时向前回扫最近 TPS_LOOKBACK 条。"""
     for r in rows:
@@ -197,7 +204,9 @@ def q_active_sessions(con, now_ms=None, limit=16):
         "select m.session_id sid, max(coalesce(m.completed_at, m.started_at)) last_ms, "
         "sum(case when m.status='running' then 1 else 0 end) running, "
         "count(*) requests, coalesce(sum(case when m.status='completed' "
-        "then m.computed_total_tokens else 0 end),0) total_tokens "
+        "then m.computed_total_tokens else 0 end),0) total_tokens, "
+        "coalesce(sum(case when m.status='completed' then m.input_tokens else 0 end),0) input_tokens, "
+        "coalesce(sum(case when m.status='completed' then m.cache_read_input_tokens else 0 end),0) cache_read "
         "from model_usage m group by m.session_id "
         "having last_ms > ? order by last_ms desc limit ?"
     ), (now_ms - SESSION_ACTIVE_MS, limit))
@@ -223,6 +232,10 @@ def q_active_sessions(con, now_ms=None, limit=16):
             "running": s["running"],
             "requests": s["requests"],
             "totalTokens": s["total_tokens"],
+            "input": s["input_tokens"],
+            "cacheRead": s["cache_read"],
+            "cacheHitRate": cache_hit_rate(s["cache_read"], s["input_tokens"]),
+            "model": (latest[0]["model_id"] if latest else ""),
             "rate": aggregate_rate(latest[:LATEST_N]),
             "lastTps": last_valid_tps(latest),
         }
@@ -246,7 +259,10 @@ def q_session(con, sid, now_ms=None):
         return None
     agg = _rows(con, (
         "select count(*) requests, coalesce(sum(computed_total_tokens),0) total, "
-        "coalesce(sum(input_tokens),0) input, coalesce(sum(output_tokens),0) output "
+        "coalesce(sum(input_tokens),0) input, coalesce(sum(output_tokens),0) output, "
+        "coalesce(sum(reasoning_tokens),0) reasoning, "
+        "coalesce(sum(cache_read_input_tokens),0) cache_read, "
+        "coalesce(sum(cache_creation_input_tokens),0) cache_write "
         "from model_usage where session_id=? and status='completed'"
     ), (sid,))[0]
     latest = _latest_rows(con, sid, RATE_LOOKBACK)
@@ -259,7 +275,7 @@ def q_session(con, sid, now_ms=None):
     ), (sid,))
     last_ms = (last_row[0]["last_ms"] if last_row else None) or now_ms
     ctx_row = _rows(con, (
-        "select input_tokens from model_usage where session_id=? and status='completed' "
+        "select input_tokens, model_id from model_usage where session_id=? and status='completed' "
         "and completed_at is not null order by completed_at desc, id desc limit 1"
     ), (sid,))
     item = {
@@ -275,6 +291,11 @@ def q_session(con, sid, now_ms=None):
         "totalTokens": agg["total"],
         "input": agg["input"],
         "output": agg["output"],
+        "reasoning": agg["reasoning"],
+        "cacheRead": agg["cache_read"],
+        "cacheWrite": agg["cache_write"],
+        "cacheHitRate": cache_hit_rate(agg["cache_read"], agg["input"]),
+        "model": (ctx_row[0]["model_id"] if ctx_row else (latest[0]["model_id"] if latest else "")),
         "context": (ctx_row[0]["input_tokens"] if ctx_row else 0),
         "rate": aggregate_rate(latest[:LATEST_N]),
         "lastTps": last_valid_tps(latest),
@@ -303,9 +324,11 @@ def q_current(con, now_ms=None):
         "coalesce(sum(cache_read_input_tokens),0) cache_read, "
         "coalesce(sum(computed_total_tokens),0) total, "
         "(select m2.input_tokens from model_usage m2 where m2.session_id=? "
-        " and m2.status='completed' order by m2.completed_at desc, m2.id desc limit 1) ctx "
+        " and m2.status='completed' order by m2.completed_at desc, m2.id desc limit 1) ctx, "
+        "(select m2.model_id from model_usage m2 where m2.session_id=? "
+        " and m2.status='completed' order by m2.completed_at desc, m2.id desc limit 1) model "
         "from model_usage where session_id=? and status='completed'"
-    ), (sid, sid))[0]
+    ), (sid, sid, sid))[0]
     latest = _latest_rows(con, sid, RATE_LOOKBACK)
     last_turn = _rows(con, (
         "select turn_id from model_usage where session_id=? and turn_id is not null "
@@ -327,6 +350,8 @@ def q_current(con, now_ms=None):
         "input": agg["input"],
         "output": agg["output"],
         "cacheRead": agg["cache_read"],
+        "cacheHitRate": cache_hit_rate(agg["cache_read"], agg["input"]),
+        "model": agg["model"] or (latest[0]["model_id"] if latest else ""),
         "total": agg["total"],
         "context": agg["ctx"] or 0,
         "rate": aggregate_rate(latest[:LATEST_N]),
@@ -366,6 +391,84 @@ def q_delta(con, since_ms, now_ms=None):
     if running["n"] and running["earliest"]:
         delta["runningElapsedSec"] = max(0, (now_ms - running["earliest"]) // 1000)
     return delta
+
+
+def q_models(con, days=7, now_ms=None):
+    """按模型聚合（默认近 7 天）：请求数、输入/输出/缓存、总量、缓存命中率、平均 TTFT。"""
+    now_ms = now_ms or int(time.time() * 1000)
+    days = max(1, min(365, int(days)))
+    since = now_ms - days * 86400000
+    rows = _rows(con, (
+        "select provider_id, model_id, count(*) requests, "
+        "coalesce(sum(input_tokens),0) input, coalesce(sum(output_tokens),0) output, "
+        "coalesce(sum(reasoning_tokens),0) reasoning, "
+        "coalesce(sum(cache_read_input_tokens),0) cache_read, "
+        "coalesce(sum(cache_creation_input_tokens),0) cache_write, "
+        "coalesce(sum(computed_total_tokens),0) total, "
+        "avg(case when time_to_first_token_ms is not null then time_to_first_token_ms end) avg_ttft_ms "
+        "from model_usage where status='completed' and completed_at>=? and completed_at<=? "
+        "group by provider_id, model_id order by total desc"
+    ), (since, now_ms + 1000))
+    for r in rows:
+        r["cacheHitRate"] = cache_hit_rate(r["cache_read"], r["input"])
+        r["avgTtftMs"] = round(r["avg_ttft_ms"]) if r["avg_ttft_ms"] is not None else None
+    return rows
+
+
+def q_recent(con, n=10):
+    """最近 N 次完成请求（含模型、TTFT、重试、工具调用、速率）。"""
+    n = max(1, min(100, int(n)))
+    rows = _rows(con, (
+        "select m.id, m.session_id, s.title, m.model_id, m.provider_id, m.turn_id, "
+        "m.started_at, m.first_token_at, m.completed_at, m.duration_ms, "
+        "m.time_to_first_token_ms, m.input_tokens, m.output_tokens, m.reasoning_tokens, "
+        "m.cache_read_input_tokens, m.cache_creation_input_tokens, m.computed_total_tokens, "
+        "m.retry_count, m.tool_call_count, m.status "
+        "from model_usage m left join session s on s.id = m.session_id "
+        "where m.status='completed' and m.completed_at is not null "
+        "order by m.completed_at desc, m.id desc limit ?"
+    ), (n,))
+    for r in rows:
+        gen, why = gen_window(r)
+        r["tps"] = round((r["output_tokens"] or 0) * 1000.0 / gen, 1) if gen else 0.0
+        r["rateReason"] = why
+        r["cacheHitRate"] = cache_hit_rate(r["cache_read_input_tokens"], r["input_tokens"])
+        r["title"] = (r["title"] or "")[:40]
+    return rows
+
+
+def render_models(models, days=7):
+    lines = ["【按模型 · 近 %d 天】" % days]
+    if not models:
+        lines.append("  无完成请求")
+        return "\n".join(lines)
+    lines.append("  %-22s %6s %9s %9s %9s %9s %8s %8s" % (
+        "模型", "请求", "输入", "输出", "缓存读", "总计", "命中率", "均TTFT"))
+    for m in models:
+        ttft = ("%.1fs" % (m["avgTtftMs"] / 1000.0)) if m.get("avgTtftMs") else "—"
+        lines.append("  %-22s %6d %9s %9s %9s %9s %7.1f%% %8s" % (
+            (m["model_id"] or "?")[:22], m["requests"], fmt_tok(m["input"]),
+            fmt_tok(m["output"]), fmt_tok(m["cache_read"]), fmt_tok(m["total"]),
+            m["cacheHitRate"], ttft))
+    return "\n".join(lines)
+
+
+def render_recent(rows):
+    lines = ["【最近 %d 次完成请求】" % len(rows)]
+    if not rows:
+        lines.append("  无完成请求")
+        return "\n".join(lines)
+    lines.append("  %-8s %-14s %8s %8s %8s %8s %6s %4s %4s  %s" % (
+        "时间", "模型", "输入", "输出", "总计", "速率", "TTFT", "重试", "工具", "会话"))
+    for r in rows:
+        t = time.strftime("%H:%M:%S", time.localtime((r["completed_at"] or 0) / 1000.0))
+        ttft = ("%.1fs" % (r["time_to_first_token_ms"] / 1000.0)) if r.get("time_to_first_token_ms") else "—"
+        tps = ("%.1f t/s" % r["tps"]) if r.get("tps") else "—"
+        lines.append("  %-8s %-14s %8s %8s %8s %8s %6s %4d %4d  %s" % (
+            t, (r["model_id"] or "?")[:14], fmt_tok(r["input_tokens"]),
+            fmt_tok(r["output_tokens"]), fmt_tok(r["computed_total_tokens"]), tps, ttft,
+            r["retry_count"] or 0, r["tool_call_count"] or 0, (r["title"] or "")[:18]))
+    return "\n".join(lines)
 
 
 def snapshot(con, since_ms=None, now_ms=None, sids=None):
@@ -467,14 +570,46 @@ def serve(remote_poll_s=3.0):
     except ImportError as e:
         sys.stderr.write("[tokmon-agent] serve needs local plugin dir: %s\n" % e)
         return 1
+    def _mtime(path):
+        try:
+            return os.stat(path).st_mtime_ns
+        except OSError:
+            return 0
+
     cfg = cfg_mod.load()
     remote_poll_s = float(cfg.get("remote", {}).get("poll_s", 3)) or remote_poll_s
-    targets = remote_mod.load_targets(cfg)
+    config_path = getattr(cfg_mod, "CONFIG_PATH", "")
+    setting_path = getattr(remote_mod, "SETTING_PATH", "")
+    runtime = {
+        "cfg": cfg,
+        "targets": remote_mod.load_targets(cfg),
+        "sigs": (_mtime(config_path), _mtime(setting_path)),
+        "catalog": cfg_mod.context_catalog(),
+    }
 
     state = {"remote": {}, "refreshed": 0.0, "sids": frozenset(), "refreshing": False}
     lock = threading.Lock()
 
-    def do_refresh(sids):
+    def reload_if_changed():
+        """config.json / setting.json 变化时热重载目标，新连的 SSH 工作区无需重启数据泵。"""
+        sigs = (_mtime(config_path), _mtime(setting_path))
+        if sigs == runtime["sigs"]:
+            return
+        try:
+            new_cfg = cfg_mod.load()
+            new_targets = remote_mod.load_targets(new_cfg)
+        except Exception as e:  # noqa: BLE001
+            sys.stderr.write("[tokmon-agent] reload targets failed: %s\n" % e)
+            return
+        runtime["cfg"] = new_cfg
+        runtime["targets"] = new_targets
+        runtime["sigs"] = sigs
+        runtime["catalog"] = cfg_mod.context_catalog()
+        with lock:
+            state["refreshed"] = 0.0   # 强制下一轮刷新
+        sys.stderr.write("[tokmon-agent] targets reloaded: %d\n" % len(new_targets))
+
+    def do_refresh(sids, targets, cfg):
         try:
             res = remote_mod.query_all(targets, cfg, sids=sids)
             for key, r in res.items():
@@ -493,7 +628,10 @@ def serve(remote_poll_s=3.0):
 
     def maybe_refresh(sids):
         """按节流策略触发后台刷新；会话集合变化时立即刷新一次。"""
+        targets = runtime["targets"]
         if not targets:
+            with lock:
+                state["remote"] = {}
             return
         now = time.monotonic()
         with lock:
@@ -503,7 +641,31 @@ def serve(remote_poll_s=3.0):
             if same and now - state["refreshed"] < remote_poll_s:
                 return
             state["refreshing"] = True
-        threading.Thread(target=do_refresh, args=(list(sids),), daemon=True).start()
+        threading.Thread(target=do_refresh, args=(list(sids), list(targets), runtime["cfg"]),
+                         daemon=True).start()
+
+    def collect_models(snap, remote_view):
+        models = set()
+
+        def add(obj):
+            if isinstance(obj, dict):
+                m = obj.get("model")
+                if m:
+                    models.add(m)
+
+        add(snap.get("current") or {})
+        for sess in snap.get("sessions") or []:
+            add(sess)
+        for stat in (snap.get("sidStats") or {}).values():
+            add(stat)
+        for res in remote_view.values():
+            data = res.get("data") or {}
+            add(data.get("current") or {})
+            for sess in data.get("sessions") or []:
+                add(sess)
+            for stat in (data.get("sidStats") or {}).values():
+                add(stat)
+        return models
 
     for raw in sys.stdin:
         raw = raw.strip()
@@ -522,6 +684,7 @@ def serve(remote_poll_s=3.0):
                     item = item.strip()
                     if item and len(item) <= 120:
                         sids.append(item)
+        reload_if_changed()
         maybe_refresh(sids)
         con = connect()
         try:
@@ -536,7 +699,21 @@ def serve(remote_poll_s=3.0):
             item = dict(r)
             item["ageMs"] = now_ms - int(r.get("ts") or 0)
             remote_view[key] = item
-        out = {"local": snap, "remote": remote_view, "ts": now_ms}
+        cfg_now = runtime["cfg"]
+        catalog = runtime["catalog"]
+        user_windows = cfg_now.get("context_windows") or {}
+        user_default = cfg_now.get("context_window_default") or 0
+        windows = {}
+        for model_id in collect_models(snap, remote_view):
+            win = cfg_mod.resolve_context_window(model_id, catalog, user_windows, user_default)
+            if win:
+                windows[model_id] = win
+        out = {
+            "local": snap,
+            "remote": remote_view,
+            "ts": now_ms,
+            "settings": {"contextWindows": windows},
+        }
         print(json.dumps(out, ensure_ascii=False), flush=True)
     sys.stderr.write("[tokmon-agent] stdin EOF, exiting\n")
     sys.stderr.flush()
@@ -569,6 +746,22 @@ def main(argv=None):
         return
     if args.scope.startswith("days:"):
         print(render_days(max(1, min(90, int(args.scope.split(":", 1)[1])))))
+        return
+    if args.scope == "models" or args.scope.startswith("models:"):
+        days = max(1, min(365, int(args.scope.split(":", 1)[1]))) if ":" in args.scope else 7
+        con = connect()
+        try:
+            print(render_models(q_models(con, days), days))
+        finally:
+            con.close()
+        return
+    if args.scope == "recent" or args.scope.startswith("recent:"):
+        n = max(1, min(100, int(args.scope.split(":", 1)[1]))) if ":" in args.scope else 10
+        con = connect()
+        try:
+            print(render_recent(q_recent(con, n)))
+        finally:
+            con.close()
         return
 
     con = connect()
