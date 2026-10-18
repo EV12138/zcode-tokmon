@@ -2,6 +2,19 @@
 
 All notable changes to Tokmon are documented here.
 
+## 1.1.1 — 2026-10-18
+
+- Cache hit rate shown after session total, source-specific today, and combined today.
+- Cache hit rate breakdown (local / remote) in the details panel.
+
+## 1.1.0 — 2026-10-18
+
+- Model breakdown (`/usage models[:days]`) with cache hit rate and average TTFT.
+- Recent request details (`/usage recent[:N]`) with rate, TTFT, retries and tool calls.
+- Context window percentage from the ZCode model catalog, with 80% / 95% warnings.
+- Dynamic remote target reload when `config.json` or ZCode `setting.json` changes.
+- Fixed remote agent deploy when passing stdin (input/stdin conflict).
+
 ## 1.0.0 — 2026-10-18
 
 First open-source release.
