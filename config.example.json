@@ -3,13 +3,30 @@
   "remote": {
     "auto_discover": true,
     "targets": [
-      { "label": "gpu-box", "host": "gpu.example.com", "username": "alice", "port": 22 },
-      { "label": "bastion", "ssh": ["ssh", "-J", "jump@bastion", "alice@10.0.0.5"] }
+      {
+        "label": "gpu-box",
+        "host": "gpu.example.com",
+        "username": "alice",
+        "port": 22
+      },
+      {
+        "label": "bastion",
+        "ssh": [
+          "ssh",
+          "-J",
+          "jump@bastion",
+          "alice@10.0.0.5"
+        ]
+      }
     ],
     "poll_s": 2,
     "timeout_s": 6,
     "control_persist_s": 300,
     "bootstrap": true,
     "neg_cache_s": 60
-  }
+  },
+  "context_windows": {
+    "glm-5.3": 1000000
+  },
+  "context_window_default": 0
 }
