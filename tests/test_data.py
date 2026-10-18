@@ -35,29 +35,36 @@ CREATE TABLE model_usage (
   model_id TEXT NOT NULL,
   status TEXT NOT NULL,
   query_source TEXT NOT NULL,
+  provider_id TEXT NOT NULL DEFAULT 'test-provider',
   started_at INTEGER NOT NULL,
   first_token_at INTEGER,
   completed_at INTEGER,
   duration_ms INTEGER,
+  time_to_first_token_ms INTEGER,
   input_tokens INTEGER NOT NULL DEFAULT 0,
   output_tokens INTEGER NOT NULL DEFAULT 0,
   reasoning_tokens INTEGER NOT NULL DEFAULT 0,
   cache_read_input_tokens INTEGER NOT NULL DEFAULT 0,
   cache_creation_input_tokens INTEGER NOT NULL DEFAULT 0,
+  retry_count INTEGER NOT NULL DEFAULT 0,
+  tool_call_count INTEGER NOT NULL DEFAULT 0,
   computed_total_tokens INTEGER NOT NULL DEFAULT 0
 );
 """
 
 
 def row(rid, sid, status="completed", started=None, first=None, completed=None,
-        inp=0, out=0, reasoning=0, model="GLM-5.3", turn="turn_1"):
+        inp=0, out=0, reasoning=0, model="GLM-5.3", turn="turn_1",
+        cache_read=0, ttft=None):
     return {
         "id": rid, "session_id": sid, "turn_id": turn, "model_id": model,
         "status": status, "query_source": "main_turn",
+        "provider_id": "test-provider",
         "started_at": started, "first_token_at": first, "completed_at": completed,
-        "duration_ms": None, "input_tokens": inp, "output_tokens": out,
-        "reasoning_tokens": reasoning, "cache_read_input_tokens": 0,
-        "cache_creation_input_tokens": 0,
+        "duration_ms": None, "time_to_first_token_ms": ttft,
+        "input_tokens": inp, "output_tokens": out,
+        "reasoning_tokens": reasoning, "cache_read_input_tokens": cache_read,
+        "cache_creation_input_tokens": 0, "retry_count": 0, "tool_call_count": 0,
         "computed_total_tokens": inp + out,
     }
 
@@ -77,9 +84,10 @@ class DataLayerTest(unittest.TestCase):
         rows = [
             # 主会话：今天三次完成（其中最后一次 first_token 缺失→不可评分）、一次错误、一次进行中
             row("r1", "sess_A", started=NOW - 15 * MIN - 5000, first=NOW - 15 * MIN - 4500,
-                completed=NOW - 15 * MIN, inp=1000, out=200),
+                completed=NOW - 15 * MIN, inp=1000, out=200, ttft=500),
             row("r2", "sess_A", started=NOW - 5 * MIN - 10000, first=NOW - 5 * MIN - 3000,
-                completed=NOW - 5 * MIN, inp=2000, out=400, reasoning=100),
+                completed=NOW - 5 * MIN, inp=2000, out=400, reasoning=100,
+                cache_read=1500, ttft=7000),
             row("r3", "sess_A", started=NOW - 2 * MIN - 10000, first=None,
                 completed=NOW - 2 * MIN, inp=3000, out=50),
             row("e1", "sess_A", status="error", started=NOW - MIN, first=NOW - MIN,
@@ -88,19 +96,20 @@ class DataLayerTest(unittest.TestCase):
                 first=None, completed=None, inp=4000, out=0),
             # 子代理：今天一次
             row("r4", "sess_B", started=NOW - 10 * MIN - 5000, first=NOW - 10 * MIN - 4000,
-                completed=NOW - 10 * MIN, inp=500, out=100),
+                completed=NOW - 10 * MIN, inp=500, out=100, ttft=1000),
             # 昨天（不应计入今日）
             row("old", "sess_C", started=NOW - 26 * HOUR, first=NOW - 26 * HOUR + 1000,
                 completed=NOW - 26 * HOUR + 5000, inp=7000, out=770),
         ]
         for r in rows:
             self.con.execute(
-                "insert into model_usage values (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                "insert into model_usage values (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (r["id"], r["session_id"], r["turn_id"], r["model_id"], r["status"],
-                 r["query_source"], r["started_at"], r["first_token_at"], r["completed_at"],
-                 r["duration_ms"], r["input_tokens"], r["output_tokens"], r["reasoning_tokens"],
+                 r["query_source"], r["provider_id"], r["started_at"], r["first_token_at"], r["completed_at"],
+                 r["duration_ms"], r["time_to_first_token_ms"], r["input_tokens"],
+                 r["output_tokens"], r["reasoning_tokens"],
                  r["cache_read_input_tokens"], r["cache_creation_input_tokens"],
-                 r["computed_total_tokens"]))
+                 r["retry_count"], r["tool_call_count"], r["computed_total_tokens"]))
         self.con.commit()
 
     def tearDown(self):
@@ -122,6 +131,8 @@ class DataLayerTest(unittest.TestCase):
         self.assertEqual(st["requests"], 3)              # completed only
         self.assertEqual(st["totalTokens"], 1200 + 2400 + 3050)
         self.assertEqual(st["context"], 3000)            # 最近一次完成请求的输入
+        self.assertEqual(st["model"], "GLM-5.3")
+        self.assertEqual(st["cacheHitRate"], 25.0)       # 1500 / 6000
         self.assertEqual(st["running"], 1)
         # 最近一次完成请求 first_token 缺失 → lastTps 回扫到 r2：400tok/10s = 40
         self.assertEqual(st["lastTps"], 40.0)
@@ -135,13 +146,34 @@ class DataLayerTest(unittest.TestCase):
         # lastTps 应回扫到更早的有效请求 r2（400tok / 10s = 40），而不是显示 0/—
         for i in range(6):
             self.con.execute(
-                "insert into model_usage values (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                "insert into model_usage values (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 ("x%d" % i, "sess_A", "t", "GLM-5.3", "completed", "main_turn",
-                 NOW - (i + 1) * 1000 - 10000, None, NOW - (i + 1) * 1000,
-                 None, 100, 10, 0, 0, 0, 110))
+                 "test-provider", NOW - (i + 1) * 1000 - 10000, None, NOW - (i + 1) * 1000,
+                 None, None, 100, 10, 0, 0, 0, 0, 0, 110))
         self.con.commit()
         st = agent.q_session(self.con, "sess_A", NOW)
         self.assertEqual(st["lastTps"], 40.0)
+
+    def test_models_and_recent(self):
+        models = agent.q_models(self.con, 1, NOW)
+        self.assertEqual(len(models), 1)
+        m = models[0]
+        self.assertEqual(m["model_id"], "GLM-5.3")
+        self.assertEqual(m["requests"], 4)               # r1 r2 r3 r4
+        self.assertEqual(m["input"], 6500)
+        self.assertEqual(m["output"], 750)
+        self.assertEqual(m["cache_read"], 1500)
+        self.assertEqual(m["cacheHitRate"], 23.1)
+        self.assertEqual(m["avgTtftMs"], 2833)           # (500+7000+1000)/3
+
+        recent = agent.q_recent(self.con, 3)
+        self.assertEqual([r["id"] for r in recent], ["r3", "r2", "r4"])
+        self.assertEqual(recent[0]["tps"], 0.0)          # r3 缺 first_token_at
+        self.assertEqual(recent[0]["rateReason"], "missingGenerationWindow")
+        self.assertEqual(recent[1]["tps"], 40.0)         # 400tok / 10s
+        self.assertEqual(recent[2]["tps"], 25.0)         # 100tok / 4s
+        self.assertEqual(recent[1]["model_id"], "GLM-5.3")
+        self.assertEqual(recent[1]["cacheHitRate"], 75.0)
 
     def test_session_missing_returns_none(self):
         self.assertIsNone(agent.q_session(self.con, "sess_missing", NOW))
@@ -161,9 +193,10 @@ class DataLayerTest(unittest.TestCase):
         since = NOW - MIN
         for i in range(600):
             self.con.execute(
-                "insert into model_usage values (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                "insert into model_usage values (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 ("bulk%d" % i, "sess_A", "t", "GLM-5.3", "completed", "main_turn",
-                 NOW - 50000, NOW - 49000, NOW - 1000, None, 5, 5, 0, 0, 0, 10))
+                 "test-provider", NOW - 50000, NOW - 49000, NOW - 1000, None, None,
+                 5, 5, 0, 0, 0, 0, 0, 10))
         self.con.commit()
         d = agent.q_delta(self.con, since, NOW)
         self.assertEqual(d["requests"], 600)
