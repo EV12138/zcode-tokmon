@@ -4,6 +4,7 @@
 
 > **English** — Tokmon is a ZCode plugin that monitors token usage and generation throughput on your machine and across SSH remote hosts. Core features (MCP tool, slash commands, terminal dashboard) never modify client files; the floating status bar is opt-in and can be removed byte-for-byte.
 
+[![Tests](https://github.com/EV12138/zcode-tokmon/actions/workflows/tests.yml/badge.svg)](https://github.com/EV12138/zcode-tokmon/actions/workflows/tests.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Python 3.9+](https://img.shields.io/badge/python-3.9%2B-3776AB.svg)](https://www.python.org/)
 
@@ -16,15 +17,16 @@ Tokmon（**Tok**en **Mon**itor）把 ZCode 的 token 消耗和生成速度变成
 - **核心零侵入**：MCP 工具、`/usage` 命令、`/usage-watch` 终端面板都不修改 ZCode 客户端文件。
 - **SSH 远程是一等公民**：不是"附加查询"，而是和本地同一条数据管线——按会话 id 精确分流，本地库查不到就交给远端主机。
 - **远端自动部署**：首次查询自动把轻量 agent 推到远端 `~/.zcode/token-monitor/agent.py`，SHA256 校验、版本不符自动更新，不需要手工传脚本。
-- **SSH 连接复用**：ControlMaster + ControlPersist，轮询不再每次全新握手。
+- **SSH 连接复用**：ControlMaster + ControlPersist，轮询不再每次全新握手；`config.json` / ZCode `setting.json` 变化自动热重载目标，新连的远程工作区无需重启数据泵。
 - **口径可验证**：速率、上下文、今日汇总都有独立 SQL 交叉校验和单元测试，不靠"看起来差不多"。
 - **可选悬浮条**：想要输入框下方的实时监控栏再显式安装；卸载后 `app.asar` 与官方版本逐字节一致（sha256 往返验证）。
 
 ## 功能
 
-- **实时速率**：⚡ tok/s，按当前会话精确取值；生成中脉冲提示。
+- **实时速率**：⚡ tok/s，按当前会话精确取值；生成中脉冲提示；缓存命中率直接反映输入复用情况。
 - **会话累计**：💬 当前会话累计 token（不含子代理，子代理是独立会话）。
-- **上下文长度**：⏱ 最近一次完成请求的输入 token（含缓存读），即下一轮的基础上下文。
+- **上下文长度**：⏱ 最近一次完成请求的输入 token（含缓存读），即下一轮的基础上下文；自动读取 ZCode 模型目录显示 `已用 / 窗口 · 百分比`，80% 黄色、95% 红色预警。
+- **模型 / 请求明细**：`/usage models` 按模型聚合请求数、输入/输出/缓存、缓存命中率、平均 TTFT；`/usage recent` 看最近 N 次请求的速率、TTFT、重试、工具调用。
 - **分源今日**：📦 当前会话所在数据源的今日总量（本地或远端主机）。
 - **全部今日**：🌐 本机 + 所有可达 SSH 远程主机的今日合计，远程失败时标黄并提示。
 - **远程健康**：☁ 成功/总主机数 + 远端窗口速率；明细面板可看每台主机的延迟、今日、会话速率。
@@ -90,6 +92,8 @@ python3 <插件目录>/patch_asar.py remove    # 卸载；与官方 app.asar 逐
 | `/usage` | 当前会话 + 今日 + 速率 |
 | `/usage today` / `week` / `days:N` | 今日 / 近 7 天 / 近 N 天 |
 | `/usage sessions` | 活跃会话列表 |
+| `/usage models[:days]` | 按模型聚合（默认 7 天）：请求、输入/输出/缓存、命中率、平均 TTFT |
+| `/usage recent[:N]` | 最近 N 次完成请求明细（默认 10）：速率、TTFT、重试、工具调用 |
 | `/usage remote` | 所有 SSH 远程主机的用量与速率 |
 | `/usage all` | 本地 + 远程汇总 |
 | `/usage-watch` | 终端实时面板（会话内跑 10 秒快照） |
@@ -105,6 +109,8 @@ python3 <插件目录>/patch_asar.py remove    # 卸载；与官方 app.asar 逐
 { "scope": "week" }
 { "scope": "days:30" }
 { "scope": "sessions" }
+{ "scope": "models:7" }     // 按模型聚合
+{ "scope": "recent:10" }    // 最近请求明细
 { "scope": "remote" }
 { "scope": "all" }
 ```
@@ -128,6 +134,10 @@ python3 "$D/cli.py" remote         # 远程报表
 ```json
 {
   "python_path": "",
+  "context_windows": {
+    "glm-5.3": 1000000
+  },
+  "context_window_default": 0,
   "remote": {
     "auto_discover": true,
     "targets": [
@@ -146,13 +156,15 @@ python3 "$D/cli.py" remote         # 远程报表
 - `auto_discover: true` 会读取 ZCode 的 `~/.zcode/v2/setting.json`，自动发现连过的 SSH 远程工作区（跳过密码型连接）。
 - `targets` 手动目标优先于自动发现；支持跳板机等自定义 `ssh` argv。
 - `python_path` 可指定数据泵使用的 Python 绝对路径（Electron 主进程 PATH 较瘦时有用）。
+- `context_windows` 覆盖模型上下文窗口（按模型 id 子串匹配）；`context_window_default` 是未匹配时的默认窗口（0 = 使用 ZCode 模型目录的默认值）。
 
 完整示例见 [`config.example.json`](config.example.json)。
 
 ## 数据口径
 
 - **速率** = `output_tokens ÷ 生成时长`；有思考段（`reasoning_tokens>0`）或 Claude 系模型从 `started_at` 起算，否则从 `first_token_at` 起算；窗口守卫 200ms～1h；最近 5 条有效样本加权。
-- **上下文长度** = 最近一次完成请求的 `input_tokens`（含缓存读），即下一轮的基础上下文。
+- **上下文长度** = 最近一次完成请求的 `input_tokens`（含缓存读），即下一轮的基础上下文；百分比窗口自动读取 ZCode `provider_config.json` / 内置模型目录，用户配置可覆盖。
+- **缓存命中率** = `cache_read / input`；输入本身已含缓存读，所以命中率高通常意味着更低的延迟和成本。
 - **今日 / 区间汇总** 只统计 `status='completed'`，排除 error/running/cancelled。
 - **总 token** = `input + output`（input 已含 cache read，不重复相加）。
 - **会话累计**只算主会话自身；子代理是独立会话，计入今日总量但不计入主会话累计。
@@ -228,6 +240,8 @@ python3 tests/test_rate.py && python3 tests/test_data.py
 
 ## 版本历史
 
+- **1.1.1** — 会话累计、分源今日、全部今日后直接显示缓存命中率；明细面板给出本机/远程拆分。
+- **1.1.0** — 模型/请求明细（`/usage models`、`/usage recent`）、缓存命中率、上下文窗口百分比与 80%/95% 预警、远程目标热重载（新 SSH 工作区免重启）。
 - **1.0.0** — 首个开源版本：本地 + SSH 远程监控、MCP/命令/终端/悬浮条、上下文长度、全部今日汇总、数据口径交叉验证。
 - 0.3.x — 数据层审计、后台远程刷新、SSH stdin 隔离、数据泵重启竞态修复。
 - 0.2.x — SSH 会话按 id 精确分流、上下文长度、UI 重构、悬停说明。
