@@ -1,0 +1,24 @@
+{
+  "name": "tokmon-marketplace",
+  "description": "Tokmon — ZCode token usage & generation-rate monitor (local + SSH remote).",
+  "owner": { "name": "EV12138" },
+  "plugins": [
+    {
+      "name": "zcode-token-monitor",
+      "displayName": "Tokmon",
+      "source": "./plugins/zcode-token-monitor",
+      "description": "Tokmon：ZCode token 用量与生成速率监控（本地 + SSH 远程）。核心零侵入，可选悬浮状态条。",
+      "description_i18n": {
+        "zh-CN": "Tokmon：ZCode token 用量与生成速率监控（本地 + SSH 远程）。核心零侵入，可选悬浮状态条。",
+        "en": "Tokmon: ZCode token usage & generation-rate monitor (local + SSH remote). Zero-intrusion core, optional status bar."
+      },
+      "version": "1.0.0",
+      "author": { "name": "EV12138" },
+      "category": "monitoring",
+      "keywords": ["tokmon", "token", "usage", "rate", "monitor", "ssh", "mcp"],
+      "homepage": "https://github.com/EV12138/zcode-tokmon",
+      "repository": "https://github.com/EV12138/zcode-tokmon",
+      "license": "MIT"
+    }
+  ]
+}
