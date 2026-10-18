@@ -135,6 +135,61 @@
   function hitUnit(p) {
     return (p == null || isNaN(p)) ? "" : "· " + fmtPct(p);
   }
+  /* 速率色阶（用户指定）：极慢 <15 / 慢 15~30 / 一般 30~50 / 良好 50~80 / 快 80~150 / 极快 >150 */
+  var RATE_TIERS = [
+    {max: 15, color: "#DC2626", label: "极慢", range: "< 15 t/s"},
+    {max: 30, color: "#EA580C", label: "慢", range: "15 ~ 30 t/s"},
+    {max: 50, color: "#F59E0B", label: "一般", range: "30 ~ 50 t/s"},
+    {max: 80, color: "#84CC16", label: "良好", range: "50 ~ 80 t/s"},
+    {max: 150, color: "#16A34A", label: "快", range: "80 ~ 150 t/s"},
+    {max: Infinity, color: "#0891B2", label: "极快", range: "> 150 t/s"}
+  ];
+  function rateTone(tps) {
+    if (!tps || tps <= 0) return {color: "", label: "—", range: "暂无数据"};
+    if (tps < 15) return RATE_TIERS[0];
+    if (tps < 30) return RATE_TIERS[1];
+    if (tps < 50) return RATE_TIERS[2];
+    if (tps < 80) return RATE_TIERS[3];
+    if (tps <= 150) return RATE_TIERS[4];
+    return RATE_TIERS[5];
+  }
+  /* 上下文占用色阶：充足 <50% / 正常 50~70% / 偏高 70~85% / 接近上限 85~95% / 即将超限 >=95% */
+  var CONTEXT_TIERS = [
+    {max: 30, color: "#16A34A", label: "充足", range: "< 30%"},
+    {max: 50, color: "#84CC16", label: "正常", range: "30% ~ 50%"},
+    {max: 70, color: "#F59E0B", label: "偏高", range: "50% ~ 70%"},
+    {max: 85, color: "#EA580C", label: "接近上限", range: "70% ~ 85%"},
+    {max: Infinity, color: "#DC2626", label: "即将超限", range: "≥ 85%"}
+  ];
+  function contextTone(pct) {
+    if (pct == null || isNaN(pct)) return {color: "", label: "未知", range: "未匹配窗口"};
+    for (var i = 0; i < CONTEXT_TIERS.length; i++) {
+      if (pct < CONTEXT_TIERS[i].max) return CONTEXT_TIERS[i];
+    }
+    return CONTEXT_TIERS[CONTEXT_TIERS.length - 1];
+  }
+  /* 色块图例：色块 + 等级 + 范围，当前档位高亮 */
+  function tierLegend(tiers, currentLabel, title) {
+    return {
+      title: title,
+      legend: tiers.map(function (t) {
+        return {color: t.color, label: t.label, range: t.range, current: t.label === currentLabel};
+      })
+    };
+  }
+  /* 上下文占用率起算点：默认 25%（前 25% 不计入），可在 config 覆盖 */
+  function contextBaseline() {
+    var st = (payload && payload.settings) || {};
+    var v = st.contextBaselinePct;
+    if (v == null) return 25;
+    v = Number(v);
+    return (isNaN(v) || v < 0 || v >= 100) ? 0 : v;
+  }
+  function contextUsagePct(rawPct, base) {
+    if (rawPct == null || isNaN(rawPct)) return null;
+    if (!base) return rawPct;
+    return Math.max(0, Math.min(100, (rawPct - base) * 100.0 / (100 - base)));
+  }
 
   /* ---------- DOM 骨架 ---------- */
   var CSS = (
@@ -173,6 +228,10 @@
     ".tokmon-live .tokmon-ic{opacity:1}" +
     ".tokmon-err .tokmon-val,.tokmon-err .tokmon-ic{color:var(--color-danger,#f87171)}" +
     ".tokmon-warn .tokmon-val,.tokmon-warn .tokmon-ic{color:var(--color-warning,#fbbf24)}" +
+    ".tokmon-grp.tokmon-rate .tokmon-val{color:var(--tokmon-rate-color,var(--color-foreground,#e9edf4))}" +
+    ".tokmon-grp.tokmon-rate .tokmon-ic{color:var(--tokmon-rate-color,var(--color-foreground-subtle,#7e8899))}" +
+    ".tokmon-grp.tokmon-ctx .tokmon-val{color:var(--tokmon-ctx-color,var(--color-foreground,#e9edf4))}" +
+    ".tokmon-grp.tokmon-ctx .tokmon-ic{color:var(--tokmon-ctx-color,var(--color-foreground-subtle,#7e8899))}" +
     ".tokmon-dot{width:5px;height:5px;border-radius:50%;background:currentColor;flex:0 0 auto}" +
     ".tokmon-pulse{animation:tokmon-p 1.3s ease-in-out infinite}" +
     ".tokmon-tip{position:fixed;z-index:9999;pointer-events:none;max-width:300px;" +
@@ -184,6 +243,14 @@
     ".tokmon-tip.on{opacity:1}" +
     ".tokmon-tip-h{font-size:11.5px;font-weight:600;letter-spacing:.02em;margin-bottom:3px}" +
     ".tokmon-tip-l{color:var(--color-foreground-subtle,#8791a3);margin-top:2px}" +
+    ".tokmon-tip-legend{margin-top:6px;padding-top:6px;border-top:1px solid var(--color-border,rgba(255,255,255,.08))}" +
+    ".tokmon-tip-legend-title{font-size:10px;font-weight:600;letter-spacing:.03em;color:var(--color-foreground-subtle,#8791a3);margin-bottom:3px}" +
+    ".tokmon-tip-legend-row{display:flex;align-items:center;gap:6px;padding:1px 3px;border-radius:4px;font-size:10.5px;line-height:1.5}" +
+    ".tokmon-tip-legend-cur{background:var(--color-hover,rgba(255,255,255,.06))}" +
+    ".tokmon-tip-swatch{width:9px;height:9px;border-radius:2px;flex:0 0 auto;box-shadow:inset 0 0 0 1px rgba(255,255,255,.15)}" +
+    ".tokmon-tip-legend-label{color:var(--color-foreground-subtle,#8791a3)}" +
+    ".tokmon-tip-legend-cur .tokmon-tip-legend-label{color:var(--color-foreground,#e9edf4);font-weight:600}" +
+    ".tokmon-tip-legend-range{margin-left:auto;color:var(--color-foreground-subtle,#8791a3);font-variant-numeric:tabular-nums}" +
     "@keyframes tokmon-p{0%,100%{opacity:1}50%{opacity:.45}}" +
     /* 明细浮层 */
     ".tokmon-panel{position:fixed;z-index:60;min-width:250px;max-width:min(420px,92vw);" +
@@ -264,7 +331,23 @@
     var t = ensureTipEl();
     t.textContent = "";
     for (var i = 0; i < sections.length; i++) {
-      t.appendChild(el("div", i === 0 ? "tokmon-tip-h" : "tokmon-tip-l", sections[i]));
+      var sec = sections[i];
+      if (sec && sec.legend) {
+        var box = el("div", "tokmon-tip-legend");
+        if (sec.title) box.appendChild(el("div", "tokmon-tip-legend-title", sec.title));
+        sec.legend.forEach(function (item) {
+          var row = el("div", "tokmon-tip-legend-row" + (item.current ? " tokmon-tip-legend-cur" : ""));
+          var sw = el("span", "tokmon-tip-swatch");
+          sw.style.background = item.color;
+          row.appendChild(sw);
+          row.appendChild(el("span", "tokmon-tip-legend-label", item.label));
+          row.appendChild(el("span", "tokmon-tip-legend-range", item.range));
+          box.appendChild(row);
+        });
+        t.appendChild(box);
+      } else {
+        t.appendChild(el("div", i === 0 ? "tokmon-tip-h" : "tokmon-tip-l", sec == null ? "" : String(sec)));
+      }
     }
     t.classList.remove("on");
     t.style.left = "-9999px";
@@ -342,12 +425,14 @@
     clearBar(bar);
     var ui = {};
     ui.rate = makeGroup(ICONS.bolt, "t/s");
+    ui.rate.g.classList.add("tokmon-rate");
     bar.appendChild(ui.rate.g);
     ui.sep1 = divider(); bar.appendChild(ui.sep1);
     ui.session = makeGroup(ICONS.chat, "");
     bar.appendChild(ui.session.g);
     ui.sep2 = divider(); bar.appendChild(ui.sep2);
     ui.ctx = makeGroup(ICONS.gauge, "");
+    ui.ctx.g.classList.add("tokmon-ctx");
     bar.appendChild(ui.ctx.g);
     ui.sep3 = divider(); bar.appendChild(ui.sep3);
     ui.today = makeGroup(ICONS.box, "");
@@ -383,7 +468,12 @@
     var isRemote = !!(view && view.src);
     var today = (isRemote && view.hostToday) ? view.hostToday : (loc.today || {});
     var ctxWin = contextWindowFor(cur && cur.model);
-    var ctxPct = (ctxWin && cur && cur.context) ? Math.round(cur.context * 100.0 / ctxWin) : 0;
+    var ctxRawPct = (ctxWin && cur && cur.context) ? cur.context * 100.0 / ctxWin : null;
+    var ctxBase = contextBaseline();
+    var ctxPct = contextUsagePct(ctxRawPct, ctxBase);
+    var ctxPctR = (ctxPct == null) ? null : Math.round(ctxPct);
+    var ctxRawR = (ctxRawPct == null) ? null : Math.round(ctxRawPct);
+    var ctxTone = contextTone(ctxPctR);   // 与显示值一致
     var remotes = remoteList();
     var remoteToday = 0, remoteOk = 0, remoteErr = 0, remoteCache = 0, remoteInput = 0;
     remotes.forEach(function (r) {
@@ -424,10 +514,13 @@
       addRow(srcSec, "会话", (cur.title || cur.sid.slice(0, 16)) + " · " + fmtTok(cur.totalTokens || cur.total) +
         " tok" + (cur.cacheHitRate == null ? "" : " · 命中 " + fmtPct(cur.cacheHitRate)));
       addRow(srcSec, "上下文长度", cur.context
-        ? fmtTok(cur.context) + (ctxWin ? " / " + fmtTok(ctxWin) + " · " + ctxPct + "%" : "") + " tok"
+        ? fmtTok(cur.context) + (ctxWin ? " / " + fmtTok(ctxWin) + " · " + ctxRawR + "%" +
+          (ctxBase ? "（颜色按 " + ctxBase + "% 起算：" + ctxPctR + "%）" : "") : "") +
+          " tok" + (ctxWin ? " · " + ctxTone.label : "")
         : "暂无完成请求");
       addRow(srcSec, "缓存命中 / 模型", fmtPct(cur.cacheHitRate) + " · " + (cur.model || "—"));
-      addRow(srcSec, "会话速率", "最近加权 " + fmtTps(r0.tps) + " · 峰值 " + fmtTps(r0.peak) + " tok/s");
+      addRow(srcSec, "会话速率", "最近加权 " + fmtTps(r0.tps) + " · 峰值 " + fmtTps(r0.peak) +
+        " tok/s · " + rateTone(r0.tps).label);
       if (cur.turnRate) {
         addRow(srcSec, "上一轮", fmtTps(cur.turnRate.tps) + " tok/s（" + fmtTok(cur.turnRate.ratedOutput || 0) + " tok）");
       }
@@ -534,7 +627,12 @@
       rateTip.push("暂无有效样本：请求完成并落库后会显示。");
     }
     if (live) rateTip.push("⚡ 闪动表示当前正在生成。");
+    var rt = rateTone(tps);
+    if (tps > 0) rateTip.push("当前等级：" + rt.label);
+    rateTip.push(tierLegend(RATE_TIERS, tps > 0 ? rt.label : "", "速率色阶"));
     setGroup(ui.rate, fmtTps(tps), "t/s", { live: !!live, pulse: !!live, tip: rateTip });
+    if (rt.color) ui.rate.g.style.setProperty("--tokmon-rate-color", rt.color);
+    else ui.rate.g.style.removeProperty("--tokmon-rate-color");
 
     /* 会话累计 + 上下文长度 */
     var hasSession = !!(mine || cur);
@@ -562,23 +660,31 @@
     var ctxVal = mine ? (mine.context || 0) : ((cur && cur.context) || 0);
     var ctxModel = mine ? mine.model : (cur && cur.model);
     var ctxWin = contextWindowFor(ctxModel);
-    var ctxPct = (ctxWin && ctxVal) ? Math.round(ctxVal * 100.0 / ctxWin) : 0;
+    var ctxRawPct = (ctxWin && ctxVal) ? ctxVal * 100.0 / ctxWin : null;
+    var ctxBase = contextBaseline();
+    var ctxPct = contextUsagePct(ctxRawPct, ctxBase);
+    var ctxPctR = (ctxPct == null) ? null : Math.round(ctxPct);
+    var ctxRawR = (ctxRawPct == null) ? null : Math.round(ctxRawPct);
+    var ct = contextTone(ctxPctR);   // 与显示值一致，避免 70% 显示黄绿之类的边界错位
     if (hasSession) {
       var ctxTip = ["上下文长度",
         "当前会话最近一次完成请求的输入 token 数（含缓存读），也是下一轮请求的基础上下文。",
         "当前 " + (ctxVal ? fmtTok(ctxVal) + " tok" : "暂无完成请求") +
-          (ctxWin ? " / " + fmtTok(ctxWin) + "（" + ctxPct + "%）" : "") +
+          (ctxWin ? " / " + fmtTok(ctxWin) + "（实际 " + ctxRawR + "%" +
+            (ctxBase ? "；颜色按 " + ctxBase + "% 起算 → " + ctxPctR + "%" : "") + "）" : "") +
           (ctxModel ? " · 模型 " + ctxModel : ""),
-        ctxWin ? "达到 80% 显示黄色、95% 显示红色；窗口来自 ZCode 模型目录，可在配置里覆盖。"
-               : "未匹配到模型窗口，仅显示绝对值。",
-        "会话压缩后会自动回落；显示 — 表示还没有完成的请求。"];
+        ctxWin ? "占用等级（颜色分级）：" + ct.label : "未匹配到模型窗口，仅显示绝对值。",
+        ctxBase ? "数字为实际占用率；颜色分级从 " + ctxBase + "% 起算（不影响数字，可在 config 调整）。" : "颜色按实际占用率分级。",
+        "会话压缩后会自动回落；显示 — 表示还没有完成的请求。"].filter(function (x) { return x; });
+      if (ctxWin) {
+        ctxTip.push(tierLegend(CONTEXT_TIERS, ct.label,
+          ctxBase ? "颜色分级值（按 " + ctxBase + "% 起算）" : "颜色分级值"));
+      }
       if (mine && mine.running) ctxTip.push("⚡ 生成中，完成后更新。");
       setGroup(ui.ctx, ctxVal ? fmtTok(ctxVal) : "—",
-        ctxWin && ctxVal ? "· " + ctxPct + "%" : "", {
-          warn: !!(ctxWin && ctxPct >= 80 && ctxPct < 95),
-          err: !!(ctxWin && ctxPct >= 95),
-          tip: ctxTip
-        });
+        ctxWin && ctxVal ? "· " + ctxRawR + "%" : "", { tip: ctxTip });
+      if (ct.color) ui.ctx.g.style.setProperty("--tokmon-ctx-color", ct.color);
+      else ui.ctx.g.style.removeProperty("--tokmon-ctx-color");
       ui.ctx.g.style.display = "";
       ui.sep3.style.display = "";
     } else {

@@ -1,21 +1,33 @@
 {
   "name": "zcode-token-monitor",
   "displayName": "Tokmon",
-  "version": "1.1.1",
+  "version": "1.1.7",
   "description": "Tokmon：ZCode token 用量与生成速率监控（本地 + SSH 远程）。MCP 工具与命令原生跨机查询，远端自动部署、SSH 连接复用；核心不修改任何客户端文件。",
   "description_i18n": {
     "en": "Tokmon: ZCode token usage & generation-rate monitor (local + SSH remote). MCP tool and commands query remote hosts natively, with auto agent deployment and SSH connection reuse. Core features never touch client files."
   },
-  "author": { "name": "EV12138" },
+  "author": {
+    "name": "EV12138"
+  },
   "homepage": "https://github.com/EV12138/zcode-tokmon",
   "repository": "https://github.com/EV12138/zcode-tokmon",
   "license": "MIT",
-  "keywords": ["tokmon", "token", "usage", "rate", "monitor", "ssh", "mcp"],
+  "keywords": [
+    "tokmon",
+    "token",
+    "usage",
+    "rate",
+    "monitor",
+    "ssh",
+    "mcp"
+  ],
   "commands": "commands",
   "mcpServers": {
     "zcode-token-monitor": {
       "command": "python3",
-      "args": ["${ZCODE_PLUGIN_ROOT}/usage_mcp.py"],
+      "args": [
+        "${ZCODE_PLUGIN_ROOT}/usage_mcp.py"
+      ],
       "enabled": true
     }
   }

@@ -590,24 +590,39 @@ def serve(remote_poll_s=3.0):
     state = {"remote": {}, "refreshed": 0.0, "sids": frozenset(), "refreshing": False}
     lock = threading.Lock()
 
+    def target_sig(targets):
+        return tuple(sorted(
+            (t.key, t.label, t.user or "", t.host or "", t.port, tuple(t.ssh_argv or ()))
+            for t in targets))
+
     def reload_if_changed():
-        """config.json / setting.json 变化时热重载目标，新连的 SSH 工作区无需重启数据泵。"""
+        """config.json / setting.json 变化时热重载目标，新连的 SSH 工作区无需重启数据泵。
+
+        只有目标集合/参数真正变化才强制远程刷新；ZCode 会频繁写 setting.json，
+        无关字段变化只更新配置，不触发 SSH 轮询。
+        """
         sigs = (_mtime(config_path), _mtime(setting_path))
         if sigs == runtime["sigs"]:
             return
+        now = time.monotonic()
+        if now - runtime.get("last_reload", 0) < 1.0:
+            return   # 去抖：避免高频写入时每个请求都读取/解析
+        runtime["last_reload"] = now
         try:
             new_cfg = cfg_mod.load()
             new_targets = remote_mod.load_targets(new_cfg)
         except Exception as e:  # noqa: BLE001
             sys.stderr.write("[tokmon-agent] reload targets failed: %s\n" % e)
             return
+        changed = target_sig(new_targets) != target_sig(runtime["targets"])
         runtime["cfg"] = new_cfg
         runtime["targets"] = new_targets
         runtime["sigs"] = sigs
         runtime["catalog"] = cfg_mod.context_catalog()
-        with lock:
-            state["refreshed"] = 0.0   # 强制下一轮刷新
-        sys.stderr.write("[tokmon-agent] targets reloaded: %d\n" % len(new_targets))
+        if changed:
+            with lock:
+                state["refreshed"] = 0.0   # 强制下一轮刷新
+            sys.stderr.write("[tokmon-agent] targets reloaded: %d\n" % len(new_targets))
 
     def do_refresh(sids, targets, cfg):
         try:
@@ -712,7 +727,10 @@ def serve(remote_poll_s=3.0):
             "local": snap,
             "remote": remote_view,
             "ts": now_ms,
-            "settings": {"contextWindows": windows},
+            "settings": {
+                "contextWindows": windows,
+                "contextBaselinePct": cfg_now.get("context_baseline_pct", 25),
+            },
         }
         print(json.dumps(out, ensure_ascii=False), flush=True)
     sys.stderr.write("[tokmon-agent] stdin EOF, exiting\n")
