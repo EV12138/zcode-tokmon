@@ -224,7 +224,8 @@
     return merged;
   }
   function fmtPct(v) {
-    return (v == null || isNaN(v)) ? "—" : (Math.round(v * 10) / 10) + "%";
+    var n = Number(v);
+    return (v == null || !isFinite(n)) ? "—" : n.toFixed(1) + "%";
   }
   /* 缓存命中率：cache_read / input；input 为 0 时返回 null（不显示单位） */
   function hitPct(cache, input) {
@@ -597,7 +598,7 @@
     var ctxWin = contextWindowFor(ctxModel, (!selModel || selMatches) ? (cur && cur.contextWindow) : 0,
       selModel ? selProvider : "", contextWindowsFor(view, isRemote));
     var ctxRawPct = (ctxWin && cur && cur.context) ? cur.context * 100.0 / ctxWin : null;
-    var ctxRawR = (ctxRawPct == null) ? null : Math.round(ctxRawPct);
+    var ctxRawR = (ctxRawPct == null) ? null : Math.round(ctxRawPct * 10) / 10;
     var ctxTone = contextTone(ctxRawR);   // 颜色按实际占用率分级
     var remotes = remoteList();
     var remoteToday = 0, remoteOk = 0, remoteErr = 0, remoteCache = 0, remoteInput = 0;
@@ -640,7 +641,7 @@
         " tok" + (cur.cacheHitRate == null ? "" : " · 命中 " + fmtPct(cur.cacheHitRate)));
       addRow(srcSec, "上下文长度", cur.context
         ? fmtTok(cur.context) + " tok" +
-          (ctxWin ? " / " + fmtTok(ctxWin) + " · " + ctxRawR + "%" : "") +
+          (ctxWin ? " / " + fmtTok(ctxWin) + " · " + fmtPct(ctxRawR) : "") +
           (ctxWin ? " · " + ctxTone.label : "") +
           (selModel && baseModel && !selMatches ? " · 已切换模型" : "")
         : "暂无完成请求");
@@ -798,7 +799,7 @@
       ? (mine ? mine.contextWindowSource : (cur && cur.contextWindowSource))
       : (ctxWin ? "model-selection" : "");
     var ctxRawPct = (ctxWin && ctxVal) ? ctxVal * 100.0 / ctxWin : null;
-    var ctxRawR = (ctxRawPct == null) ? null : Math.round(ctxRawPct);
+    var ctxRawR = (ctxRawPct == null) ? null : Math.round(ctxRawPct * 10) / 10;
     var ct = contextTone(ctxRawR);   // 颜色按实际占用率分级，避免 45% 仍显示绿色
     if (hasSession) {
       var srcLabels = {
@@ -811,7 +812,7 @@
       var ctxTip = ["上下文长度",
         "当前会话最近一次完成请求的输入 token 数（含缓存读），也是下一轮请求的基础上下文。",
         "当前 " + (ctxVal ? fmtTok(ctxVal) + " tok" : "暂无完成请求") +
-          (ctxWin ? " / " + fmtTok(ctxWin) + "（" + ctxRawR + "%）" : "") +
+          (ctxWin ? " / " + fmtTok(ctxWin) + "（" + fmtPct(ctxRawR) + "）" : "") +
           (ctxModel ? " · 模型 " + ctxModel : ""),
         ctxWin ? "占用等级（颜色分级）：" + ct.label : "未找到该模型的上下文窗口配置，仅显示绝对值。",
         ctxWin ? "窗口取自" + (srcLabels[ctxSrc] || "ZCode 模型目录") + "；数字与颜色都按实际占用率计算。"
@@ -825,7 +826,7 @@
       }
       if (mine && mine.running) ctxTip.push("⚡ 生成中，完成后更新。");
       setGroup(ui.ctx, ctxVal ? fmtTok(ctxVal) : "—",
-        ctxWin && ctxVal ? "· " + ctxRawR + "%" : "", { tip: ctxTip });
+        ctxWin && ctxVal ? "· " + fmtPct(ctxRawR) : "", { tip: ctxTip });
       if (ct.color) ui.ctx.g.style.setProperty("--tokmon-ctx-color", ct.color);
       else ui.ctx.g.style.removeProperty("--tokmon-ctx-color");
       ui.ctx.g.style.display = "";

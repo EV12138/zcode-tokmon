@@ -2,6 +2,11 @@
 
 All notable changes to Tokmon are documented here.
 
+## 1.1.12 — 2026-10-19
+
+- All percentage values in the status bar, hover tooltips and details panel now
+  use exactly one decimal place (e.g. 45.0%, 88.0% instead of 45%, 88%).
+
 ## 1.1.11 — 2026-10-19
 
 - Hover tooltips stay open while the chat auto-scrolls during streaming, and
