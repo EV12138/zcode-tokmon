@@ -2,6 +2,13 @@
 
 All notable changes to Tokmon are documented here.
 
+## 1.1.11 — 2026-10-19
+
+- Hover tooltips stay open while the chat auto-scrolls during streaming, and
+  follow the data bar when it moves; they no longer disappear on every scroll.
+- Re-entering the same data group after the tip was hidden reopens it instead
+  of being blocked by stale hover state.
+
 ## 1.1.10 — 2026-10-19
 
 - Switching the model in the current chat immediately recalculates the context

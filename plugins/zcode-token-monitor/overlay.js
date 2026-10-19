@@ -399,7 +399,7 @@
   }
   /* 一个数据组：图标 + 数值 + 单位；opts: tone/pulse/dot/title/click/clickable */
   /* ---------- 悬浮说明卡片 ---------- */
-  var tipEl = null, tipTimer = 0;
+  var tipEl = null, tipTimer = 0, tipTarget = null, tipRaf = 0;
 
   function ensureTipEl() {
     if (tipEl && tipEl.isConnected) return tipEl;
@@ -410,10 +410,13 @@
   function hideTip() {
     clearTimeout(tipTimer);
     tipTimer = 0;
+    tipTarget = null;
+    if (tipRaf) { cancelAnimationFrame(tipRaf); tipRaf = 0; }
     if (tipEl) tipEl.classList.remove("on");
   }
   function showTip(target, sections) {
     var t = ensureTipEl();
+    tipTarget = target;
     t.textContent = "";
     for (var i = 0; i < sections.length; i++) {
       var sec = sections[i];
@@ -446,6 +449,30 @@
     t.style.top = Math.max(8, top) + "px";
     t.classList.add("on");
   }
+  /* 视口滚动/尺寸变化：提示开着就跟着目标重定位，不再一律关掉。
+   * 流式输出时聊天区会持续自动滚动，旧逻辑会把悬停提示瞬间隐藏。 */
+  function repositionTip(target) {
+    if (!tipEl || !target || !target.isConnected) return;
+    var r = target.getBoundingClientRect();
+    if (r.bottom < 0 || r.top > window.innerHeight) { hideTip(); return; }
+    var tw = tipEl.offsetWidth, th = tipEl.offsetHeight;
+    var left = Math.max(8, Math.min(r.left + r.width / 2 - tw / 2, window.innerWidth - tw - 8));
+    var top = r.top - th - 8;
+    if (top < 8) top = Math.min(r.bottom + 8, window.innerHeight - th - 8);
+    tipEl.style.left = left + "px";
+    tipEl.style.top = Math.max(8, top) + "px";
+  }
+  function onViewportChange() {
+    if (tipEl && tipEl.classList.contains("on") && tipTarget && tipTarget.isConnected) {
+      if (tipRaf) return;
+      tipRaf = requestAnimationFrame(function () {
+        tipRaf = 0;
+        if (tipEl && tipEl.classList.contains("on")) repositionTip(tipTarget);
+      });
+      return;
+    }
+    hideTip();
+  }
   function scheduleTip(target, sections) {
     clearTimeout(tipTimer);
     tipTimer = setTimeout(function () { showTip(target, sections); }, 140);
@@ -453,7 +480,9 @@
   function bindBarTips(bar) {
     bar.addEventListener("mouseover", function (e) {
       var g = e.target && e.target.closest ? e.target.closest(".tokmon-grp") : null;
-      if (!g || !bar.contains(g) || bar.__tipTarget === g) return;
+      if (!g || !bar.contains(g)) return;
+      /* 提示被滚动隐藏后，重新移入同一组也要能再次弹出 */
+      if (bar.__tipTarget === g && tipEl && tipEl.classList.contains("on")) return;
       bar.__tipTarget = g;
       if (g.__tip) scheduleTip(g, g.__tip());
       else hideTip();
@@ -942,6 +971,7 @@
       var bw = bar.offsetWidth;
       if (left + bw > window.innerWidth - 8) left = Math.max(8, window.innerWidth - bw - 8);
       bar.style.left = left + "px";
+      if (tipEl && tipEl.classList.contains("on") && bar.__tipTarget) repositionTip(bar.__tipTarget);
     }
 
     attach();
@@ -1021,7 +1051,7 @@
   /* 菜单选择/点击后立刻检查，不等 600ms 轮询 */
   document.addEventListener("click", function () { setTimeout(refreshSelectedModel, 60); }, true);
   document.addEventListener("keydown", function () { setTimeout(refreshSelectedModel, 60); }, true);
-  window.__tokmonWinHide = function () { hideTip(); };
+  window.__tokmonWinHide = onViewportChange;
   window.addEventListener("scroll", window.__tokmonWinHide, true);
   window.addEventListener("resize", window.__tokmonWinHide);
 
