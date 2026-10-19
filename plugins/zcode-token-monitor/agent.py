@@ -47,8 +47,12 @@ SESSION_ACTIVE_MS = 30 * 60 * 1000      # 30 分钟内有请求视为活跃会�
 LATEST_N = 5                             # 最近 N 次完成请求算加权速率
 RATE_LOOKBACK = 20                       # lastTps 回扫上限（first_token_at 缺失很常见）
 
+# ZCode 自己的模型配置：provider.*.models.*.limit.context 是用户在模型设置里看到的值
+MODEL_CONFIG_PATH = os.path.join(os.path.expanduser("~"), ".zcode", "v2", "config.json")
+PROVIDER_RULES_PATH = os.path.join(os.path.expanduser("~"), ".zcode", "v2", "provider_config.json")
+
 MODEL_RATE_COLS = (
-    "id, session_id, turn_id, model_id, status, query_source, "
+    "id, session_id, turn_id, provider_id, model_id, status, query_source, "
     "started_at, first_token_at, completed_at, duration_ms, "
     "input_tokens, output_tokens, reasoning_tokens, "
     "cache_read_input_tokens, cache_creation_input_tokens, computed_total_tokens"
@@ -131,6 +135,197 @@ def cache_hit_rate(cache_read, input_tokens):
     if not input_tokens:
         return 0.0
     return round((cache_read or 0) * 100.0 / input_tokens, 1)
+
+
+# ---------------------------------------------------------------- 上下文窗口
+
+_MODEL_CTX_CACHE = {"sig": None, "catalog": None}
+
+
+def _read_json(path):
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except (OSError, ValueError):
+        return None
+
+
+def _stat_sig(paths):
+    sig = []
+    for path in paths:
+        try:
+            st = os.stat(path)
+            sig.append((path, st.st_mtime_ns, st.st_size))
+        except OSError:
+            sig.append((path, 0, 0))
+    return tuple(sig)
+
+
+def build_model_context_catalog(config_data=None, provider_data=None):
+    """从 ZCode 配置构建上下文窗口目录。
+
+    provider_config.json 的模型规则是模型设置界面的当前值，优先级高于
+    config.json 的 provider 模型目录（legacy）。返回：
+      scoped:  {(provider_id, model_id) -> (window, source)}
+      by_model: {model_id -> (window, source)}
+    """
+    best = {}  # (pid, mid) -> (priority, window, source)
+
+    def add(pid, mid, win, priority, source):
+        try:
+            win = int(win or 0)
+        except (TypeError, ValueError):
+            return
+        if not mid or win <= 0:
+            return
+        mid = str(mid).lower()
+        pid = str(pid or "").lower()
+        key = (pid, mid)
+        old = best.get(key)
+        if old is None or priority > old[0] or (priority == old[0] and win > old[1]):
+            best[key] = (priority, win, source)
+
+    providers = ((config_data or {}).get("provider") or {})
+    if isinstance(providers, dict):
+        for pid, prov in providers.items():
+            models = (prov or {}).get("models") if isinstance(prov, dict) else None
+            if not isinstance(models, dict):
+                continue
+            for mid, model in models.items():
+                limit = (model or {}).get("limit") if isinstance(model, dict) else None
+                if isinstance(limit, dict):
+                    add(pid, mid, limit.get("context"), 20, "zcode-config")
+
+    rules = (((provider_data or {}).get("config") or {}).get("modelConfigRules") or {})
+    if isinstance(rules, dict):
+        for bucket in ("providerModelRules", "manualProviderModelRules", "modelRules"):
+            for rule in rules.get(bucket) or []:
+                if not isinstance(rule, dict):
+                    continue
+                props = ((rule.get("config") or {}).get("properties") or {})
+                add(rule.get("providerId"), rule.get("modelId"),
+                    props.get("contextWindow"), 30, "zcode-rules")
+
+    scoped = {key: (win, src) for key, (_pri, win, src) in best.items()}
+    by_model = {}
+    for (_pid, mid), (pri, win, src) in best.items():
+        cur = by_model.get(mid)
+        if cur is None or (pri, win) > (cur[0], cur[1]):
+            by_model[mid] = (pri, win, src)
+    return {
+        "scoped": scoped,
+        "by_model": {mid: (win, src) for mid, (_pri, win, src) in by_model.items()},
+    }
+
+
+def model_context_catalog():
+    """带 mtime 缓存的目录；模型配置变化后下一次查询自动生效。"""
+    paths = (MODEL_CONFIG_PATH, PROVIDER_RULES_PATH)
+    sig = _stat_sig(paths)
+    if _MODEL_CTX_CACHE["sig"] == sig:
+        return _MODEL_CTX_CACHE["catalog"]
+    catalog = build_model_context_catalog(_read_json(MODEL_CONFIG_PATH),
+                                          _read_json(PROVIDER_RULES_PATH))
+    _MODEL_CTX_CACHE["sig"] = sig
+    _MODEL_CTX_CACHE["catalog"] = catalog
+    return catalog
+
+
+def resolve_model_context_ex(model_id, provider_id="", catalog=None,
+                             user_windows=None, user_default=0):
+    """模型 -> (窗口, 来源)。优先插件显式覆盖，其次该 provider 的模型配置。"""
+    if not model_id:
+        return (0, "")
+    model = str(model_id).lower()
+    provider = str(provider_id or "").lower()
+    best_win, best_len = 0, -1
+    for key, value in (user_windows or {}).items():
+        try:
+            win = int(value)
+        except (TypeError, ValueError):
+            continue
+        if win <= 0:
+            continue
+        key = str(key).lower()
+        if (provider and key == provider + "/" + model) or key == model:
+            return (win, "plugin-config")
+        if key and key in model and len(key) > best_len:
+            best_win, best_len = win, len(key)
+    if best_win:
+        return (best_win, "plugin-config")
+    catalog = catalog or model_context_catalog()
+    if provider:
+        hit = catalog["scoped"].get((provider, model))
+        if hit:
+            return hit
+    hit = catalog["by_model"].get(model)
+    if hit:
+        return hit
+    if "/" in model:
+        hit = catalog["by_model"].get(model.split("/", 1)[1])
+        if hit:
+            return hit
+    try:
+        user_default = int(user_default or 0)
+    except (TypeError, ValueError):
+        user_default = 0
+    return (user_default, "default") if user_default > 0 else (0, "")
+
+
+def resolve_model_context(model_id, provider_id="", catalog=None,
+                          user_windows=None, user_default=0):
+    return resolve_model_context_ex(model_id, provider_id, catalog,
+                                    user_windows, user_default)[0]
+
+
+def attach_context_windows(snap, catalog=None, user_windows=None, user_default=0):
+    """给会话/当前视图附上 contextWindow 与来源，覆盖本地与远端快照。"""
+    catalog = catalog or model_context_catalog()
+
+    def apply(item):
+        if not isinstance(item, dict):
+            return
+        model = item.get("model") or item.get("runningModel") or ""
+        provider = item.get("provider") or item.get("runningProvider") or ""
+        win, source = resolve_model_context_ex(model, provider, catalog,
+                                               user_windows, user_default)
+        if win:
+            item["contextWindow"] = win
+            item["contextWindowSource"] = source
+
+    apply(snap.get("current"))
+    for item in snap.get("sessions") or []:
+        apply(item)
+    for item in (snap.get("sidStats") or {}).values():
+        apply(item)
+    return snap
+
+
+_EMPTY_MODEL_CATALOG = {"scoped": {}, "by_model": {}}
+
+
+def apply_user_windows(snap, user_windows):
+    """只应用插件 config 的显式覆盖；不覆盖远端自己的模型配置。"""
+    if not user_windows:
+        return snap
+
+    def apply(item):
+        if not isinstance(item, dict):
+            return
+        model = item.get("model") or item.get("runningModel") or ""
+        provider = item.get("provider") or item.get("runningProvider") or ""
+        win, _ = resolve_model_context_ex(model, provider, _EMPTY_MODEL_CATALOG,
+                                          user_windows, 0)
+        if win:
+            item["contextWindow"] = win
+            item["contextWindowSource"] = "plugin-config"
+
+    apply(snap.get("current"))
+    for item in snap.get("sessions") or []:
+        apply(item)
+    for item in (snap.get("sidStats") or {}).values():
+        apply(item)
+    return snap
 
 
 def last_valid_tps(rows):
@@ -218,7 +413,7 @@ def q_active_sessions(con, now_ms=None, limit=16):
         ), (s["sid"],))
         latest = _latest_rows(con, s["sid"], RATE_LOOKBACK)
         running_row = _rows(con, (
-            "select started_at, model_id from model_usage "
+            "select started_at, model_id, provider_id from model_usage "
             "where session_id=? and status='running' order by started_at desc limit 1"
         ), (s["sid"],))
         item = {
@@ -236,11 +431,13 @@ def q_active_sessions(con, now_ms=None, limit=16):
             "cacheRead": s["cache_read"],
             "cacheHitRate": cache_hit_rate(s["cache_read"], s["input_tokens"]),
             "model": (latest[0]["model_id"] if latest else ""),
+            "provider": (latest[0]["provider_id"] if latest else ""),
             "rate": aggregate_rate(latest[:LATEST_N]),
             "lastTps": last_valid_tps(latest),
         }
         if running_row:
             item["runningModel"] = running_row[0]["model_id"]
+            item["runningProvider"] = running_row[0]["provider_id"]
             item["runningElapsedSec"] = max(0, (now_ms - running_row[0]["started_at"]) // 1000)
         out.append(item)
     return out
@@ -267,7 +464,7 @@ def q_session(con, sid, now_ms=None):
     ), (sid,))[0]
     latest = _latest_rows(con, sid, RATE_LOOKBACK)
     running_row = _rows(con, (
-        "select started_at, model_id from model_usage "
+        "select started_at, model_id, provider_id from model_usage "
         "where session_id=? and status='running' order by started_at desc limit 1"
     ), (sid,))
     last_row = _rows(con, (
@@ -275,7 +472,7 @@ def q_session(con, sid, now_ms=None):
     ), (sid,))
     last_ms = (last_row[0]["last_ms"] if last_row else None) or now_ms
     ctx_row = _rows(con, (
-        "select input_tokens, model_id from model_usage where session_id=? and status='completed' "
+        "select input_tokens, model_id, provider_id from model_usage where session_id=? and status='completed' "
         "and completed_at is not null order by completed_at desc, id desc limit 1"
     ), (sid,))
     item = {
@@ -296,12 +493,14 @@ def q_session(con, sid, now_ms=None):
         "cacheWrite": agg["cache_write"],
         "cacheHitRate": cache_hit_rate(agg["cache_read"], agg["input"]),
         "model": (ctx_row[0]["model_id"] if ctx_row else (latest[0]["model_id"] if latest else "")),
+        "provider": (ctx_row[0]["provider_id"] if ctx_row else (latest[0]["provider_id"] if latest else "")),
         "context": (ctx_row[0]["input_tokens"] if ctx_row else 0),
         "rate": aggregate_rate(latest[:LATEST_N]),
         "lastTps": last_valid_tps(latest),
     }
     if running_row:
         item["runningModel"] = running_row[0]["model_id"]
+        item["runningProvider"] = running_row[0]["provider_id"]
         item["runningElapsedSec"] = max(0, (now_ms - running_row[0]["started_at"]) // 1000)
     return item
 
@@ -326,9 +525,11 @@ def q_current(con, now_ms=None):
         "(select m2.input_tokens from model_usage m2 where m2.session_id=? "
         " and m2.status='completed' order by m2.completed_at desc, m2.id desc limit 1) ctx, "
         "(select m2.model_id from model_usage m2 where m2.session_id=? "
-        " and m2.status='completed' order by m2.completed_at desc, m2.id desc limit 1) model "
+        " and m2.status='completed' order by m2.completed_at desc, m2.id desc limit 1) model, "
+        "(select m2.provider_id from model_usage m2 where m2.session_id=? "
+        " and m2.status='completed' order by m2.completed_at desc, m2.id desc limit 1) provider "
         "from model_usage where session_id=? and status='completed'"
-    ), (sid, sid, sid))[0]
+    ), (sid, sid, sid, sid))[0]
     latest = _latest_rows(con, sid, RATE_LOOKBACK)
     last_turn = _rows(con, (
         "select turn_id from model_usage where session_id=? and turn_id is not null "
@@ -352,6 +553,7 @@ def q_current(con, now_ms=None):
         "cacheRead": agg["cache_read"],
         "cacheHitRate": cache_hit_rate(agg["cache_read"], agg["input"]),
         "model": agg["model"] or (latest[0]["model_id"] if latest else ""),
+        "provider": agg["provider"] or (latest[0]["provider_id"] if latest else ""),
         "total": agg["total"],
         "context": agg["ctx"] or 0,
         "rate": aggregate_rate(latest[:LATEST_N]),
@@ -486,6 +688,17 @@ def snapshot(con, since_ms=None, now_ms=None, sids=None):
         snap["sidStats"] = {sid: q_session(con, sid, now_ms) for sid in sids}
     if since_ms is not None:
         snap["delta"] = q_delta(con, since_ms, now_ms)
+    attach_context_windows(snap)
+    # 本机模型配置的全量窗口：切换模型后前端可立即按新模型重算
+    cat = model_context_catalog()
+    windows = {}
+    for mid, (win, _src) in cat["by_model"].items():
+        if win:
+            windows[mid] = win
+    for (pid, mid), (win, _src) in cat["scoped"].items():
+        if pid and win:
+            windows[pid + "/" + mid] = win
+    snap["contextWindows"] = windows
     return snap
 
 
@@ -584,7 +797,6 @@ def serve(remote_poll_s=3.0):
         "cfg": cfg,
         "targets": remote_mod.load_targets(cfg),
         "sigs": (_mtime(config_path), _mtime(setting_path)),
-        "catalog": cfg_mod.context_catalog(),
     }
 
     state = {"remote": {}, "refreshed": 0.0, "sids": frozenset(), "refreshing": False}
@@ -618,7 +830,6 @@ def serve(remote_poll_s=3.0):
         runtime["cfg"] = new_cfg
         runtime["targets"] = new_targets
         runtime["sigs"] = sigs
-        runtime["catalog"] = cfg_mod.context_catalog()
         if changed:
             with lock:
                 state["refreshed"] = 0.0   # 强制下一轮刷新
@@ -660,13 +871,13 @@ def serve(remote_poll_s=3.0):
                          daemon=True).start()
 
     def collect_models(snap, remote_view):
-        models = set()
+        pairs = set()
 
         def add(obj):
             if isinstance(obj, dict):
-                m = obj.get("model")
+                m = obj.get("model") or obj.get("runningModel")
                 if m:
-                    models.add(m)
+                    pairs.add((obj.get("provider") or obj.get("runningProvider") or "", m))
 
         add(snap.get("current") or {})
         for sess in snap.get("sessions") or []:
@@ -680,7 +891,7 @@ def serve(remote_poll_s=3.0):
                 add(sess)
             for stat in (data.get("sidStats") or {}).values():
                 add(stat)
-        return models
+        return pairs
 
     for raw in sys.stdin:
         raw = raw.strip()
@@ -715,14 +926,35 @@ def serve(remote_poll_s=3.0):
             item["ageMs"] = now_ms - int(r.get("ts") or 0)
             remote_view[key] = item
         cfg_now = runtime["cfg"]
-        catalog = runtime["catalog"]
         user_windows = cfg_now.get("context_windows") or {}
         user_default = cfg_now.get("context_window_default") or 0
+        catalog = model_context_catalog()
+        # 本地快照：模型设置里的窗口；显式 config 覆盖优先
+        attach_context_windows(snap, catalog, user_windows, user_default)
+        apply_user_windows(snap, user_windows)
+        # 远端快照由各自主机 agent 附带自己的模型配置，仅应用本地显式覆盖
+        for item in remote_view.values():
+            apply_user_windows(item.get("data") or {}, user_windows)
         windows = {}
-        for model_id in collect_models(snap, remote_view):
-            win = cfg_mod.resolve_context_window(model_id, catalog, user_windows, user_default)
+        for provider, model_id in collect_models(snap, remote_view):
+            win = resolve_model_context(model_id, provider, catalog,
+                                        user_windows, user_default)
             if win:
                 windows[model_id] = win
+                if provider:
+                    windows[provider + "/" + model_id] = win
+        # 把模型配置里的所有模型也带上：切换模型后前端可立即按新窗口重算，
+        # 不必等该模型产生第一条请求。
+        for mid, (win, _src) in catalog["by_model"].items():
+            resolved = resolve_model_context(mid, "", catalog, user_windows, user_default)
+            if resolved:
+                windows.setdefault(mid, resolved)
+        for (pid, mid), (win, _src) in catalog["scoped"].items():
+            if not pid:
+                continue
+            resolved = resolve_model_context(mid, pid, catalog, user_windows, user_default)
+            if resolved:
+                windows[pid + "/" + mid] = resolved
         out = {
             "local": snap,
             "remote": remote_view,

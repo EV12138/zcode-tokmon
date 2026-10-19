@@ -23,6 +23,8 @@ jobs:
         run: python tests/test_rate.py
       - name: Data layer
         run: python tests/test_data.py
+      - name: Context config
+        run: python tests/test_model_context.py
 
   syntax:
     runs-on: ubuntu-latest

@@ -41,6 +41,11 @@
   var instances = [];
   /* 主进程按窗口上报的活跃会话 id（原生 IPC zcode:sync-active-task-session） */
   var activeSid = window.__tokmonActiveSid || "";
+  /* 当前聊天窗口选中的模型（切换后立即生效，不必等新请求落库） */
+  var selectedModel = null, selectedKey = "";
+  var activeComposer = null;
+  var LAST_SESSION_PREFIX = "zcode-v4-last-session:v1:";
+  var MODEL_SELECTION_PREFIX = "zcode-model-selection-recent-v1:";
 
   /* ---------- 格式化 ---------- */
   function fmtTok(n) {
@@ -109,21 +114,114 @@
   function mySessionSid(composer) {
     return sessIdOf(composer) || activeSid || "";
   }
-  /* 模型上下文窗口：数据泵已按 ZCode 模型目录解析，按模型 id 精确/最长子串匹配 */
-  function contextWindowFor(model) {
+  /* 从模型选择按钮读取当前模型（ZCode 的 data-testid 稳定标记） */
+  function selectionFromPicker() {
+    function visible(node) {
+      var r = node.getBoundingClientRect();
+      return r.width > 0 && r.height > 0 && r.bottom > 0 && r.top < window.innerHeight;
+    }
+    var el = null;
+    if (activeComposer) {
+      var node = activeComposer;
+      for (var up = 0; up < 6 && node; up++, node = node.parentElement) {
+        el = node.querySelector && node.querySelector('[data-testid="chat-model-select-trigger"]');
+        if (el) break;
+      }
+    }
+    if (!el) {
+      var list = document.querySelectorAll('[data-testid="chat-model-select-trigger"]');
+      for (var i = 0; i < list.length; i++) {
+        if (visible(list[i])) { el = list[i]; break; }
+      }
+    }
+    if (!el) return null;
+    var label = (el.getAttribute("aria-label") || el.innerText || "").trim();
+    if (!label) return null;
+    label = label.split("\n")[0].replace(/[⌄▾\s]+$/, "").trim();
+    var id = label.split("/").pop().trim();
+    if (!id || (!/\//.test(label) && /模型|选择|model/i.test(id))) return null;
+    return { modelId: id, providerId: "", label: label, source: "picker" };
+  }
+  /* 从 localStorage 读当前会话的模型选择（带精确 providerId） */
+  function selectionFromStorage(sid) {
+    try {
+      if (!sid) return null;
+      var suffix = "";
+      for (var i = 0; i < localStorage.length; i++) {
+        var key = localStorage.key(i);
+        if (key && key.indexOf(LAST_SESSION_PREFIX) === 0 && localStorage.getItem(key) === sid) {
+          suffix = key.slice(LAST_SESSION_PREFIX.length);
+          break;
+        }
+      }
+      if (!suffix) return null;
+      var raw = localStorage.getItem(MODEL_SELECTION_PREFIX + suffix);
+      if (!raw) return null;
+      var sel = (JSON.parse(raw) || {}).modelSelection;
+      if (!sel || !sel.modelId) return null;
+      return { modelId: sel.modelId, providerId: sel.providerId || "", label: sel.modelId, source: "storage" };
+    } catch (e) { return null; }
+  }
+  function readSelectedModel() {
+    var picker = selectionFromPicker();
+    var stored = selectionFromStorage(activeSid);
+    if (picker && stored && picker.modelId.toLowerCase() === stored.modelId.toLowerCase()) {
+      return { modelId: stored.modelId, providerId: stored.providerId, label: picker.label, source: "storage" };
+    }
+    return picker || stored;
+  }
+  /* 切换模型后立即重算上下文；只在选择真正变化时重绘 */
+  function refreshSelectedModel() {
+    var sel = readSelectedModel();
+    var key = sel ? ((sel.providerId || "") + "|" + sel.modelId).toLowerCase() : "";
+    if (key === selectedKey) return;
+    selectedKey = key;
+    selectedModel = sel;
+    for (var i = 0; i < instances.length; i++) {
+      try { instances[i].render(); } catch (e) { }
+    }
+    refreshPanel();
+  }
+  /* 模型上下文窗口：优先用数据泵按该会话模型配置解析出的 contextWindow；
+   * 没带（旧远端 agent）时才回退到 settings.contextWindows 映射。
+   * provider 已知时优先匹配 “provider/model”，避免同名模型串窗口。 */
+  function contextWindowFor(model, hint, provider, winsOverride) {
+    var h = Number(hint);
+    if (isFinite(h) && h > 0) return h;
     if (!model) return 0;
-    var wins = (payload && payload.settings && payload.settings.contextWindows) || {};
+    var wins = winsOverride ||
+      (payload && payload.settings && payload.settings.contextWindows) || {};
     var m = String(model).toLowerCase();
+    if (provider) {
+      var pk = String(provider).toLowerCase() + "/" + m;
+      for (var p in wins) {
+        if (String(p).toLowerCase() === pk) return Number(wins[p]) || 0;
+      }
+    }
+    for (var e in wins) {
+      if (String(e).toLowerCase() === m) return Number(wins[e]) || 0;
+    }
     if (wins[model] != null) return Number(wins[model]) || 0;
     var best = 0, bestLen = -1;
     for (var k in wins) {
       var key = String(k).toLowerCase();
-      if (key && m.indexOf(key) >= 0 && key.length > bestLen) {
+      if (key && key.indexOf("/") < 0 && m.indexOf(key) >= 0 && key.length > bestLen) {
         best = Number(wins[k]) || 0;
         bestLen = key.length;
       }
     }
     return best;
+  }
+  /* 当前数据源的窗口表：远端优先用远主机 agent 带回的本机模型配置 */
+  function contextWindowsFor(view, isRemote) {
+    var base = (payload && payload.settings && payload.settings.contextWindows) || {};
+    if (!isRemote || !view || !view.src || !view.src.data) return base;
+    var remote = view.src.data.contextWindows;
+    if (!remote) return base;
+    var merged = {};
+    for (var k in base) merged[k] = base[k];
+    for (var r in remote) merged[r] = remote[r];
+    return merged;
   }
   function fmtPct(v) {
     return (v == null || isNaN(v)) ? "—" : (Math.round(v * 10) / 10) + "%";
@@ -442,10 +540,17 @@
   }
 
   /* ---------- 明细浮层 ---------- */
-  var panel = null;
+  var panel = null, panelAnchor = null, panelSid = null;
   function closePanel() { if (panel) { panel.remove(); panel = null; } }
+  function refreshPanel() {
+    if (!panel) return;
+    var anchor = panelAnchor, sid = panelSid;
+    closePanel();
+    togglePanel(anchor, sid);
+  }
   function togglePanel(anchor, sid) {
     if (panel) { closePanel(); return; }
+    panelAnchor = anchor; panelSid = sid;
     panel = el("div", "tokmon-panel");
     document.body.appendChild(panel);
 
@@ -454,7 +559,14 @@
     var cur = (view && view.sess) || loc.current || null;
     var isRemote = !!(view && view.src);
     var today = (isRemote && view.hostToday) ? view.hostToday : (loc.today || {});
-    var ctxWin = contextWindowFor(cur && cur.model);
+    var baseModel = cur && cur.model;
+    var selModel = (selectedModel && selectedModel.modelId) || "";
+    var selProvider = selectedModel ? (selectedModel.providerId || "") : "";
+    var selMatches = !!(selModel && baseModel &&
+      selModel.toLowerCase() === String(baseModel).toLowerCase());
+    var ctxModel = selModel || baseModel;
+    var ctxWin = contextWindowFor(ctxModel, (!selModel || selMatches) ? (cur && cur.contextWindow) : 0,
+      selModel ? selProvider : "", contextWindowsFor(view, isRemote));
     var ctxRawPct = (ctxWin && cur && cur.context) ? cur.context * 100.0 / ctxWin : null;
     var ctxRawR = (ctxRawPct == null) ? null : Math.round(ctxRawPct);
     var ctxTone = contextTone(ctxRawR);   // 颜色按实际占用率分级
@@ -498,10 +610,12 @@
       addRow(srcSec, "会话", (cur.title || cur.sid.slice(0, 16)) + " · " + fmtTok(cur.totalTokens || cur.total) +
         " tok" + (cur.cacheHitRate == null ? "" : " · 命中 " + fmtPct(cur.cacheHitRate)));
       addRow(srcSec, "上下文长度", cur.context
-        ? fmtTok(cur.context) + (ctxWin ? " / " + fmtTok(ctxWin) + " · " + ctxRawR + "%" : "") +
-          " tok" + (ctxWin ? " · " + ctxTone.label : "")
+        ? fmtTok(cur.context) + " tok" +
+          (ctxWin ? " / " + fmtTok(ctxWin) + " · " + ctxRawR + "%" : "") +
+          (ctxWin ? " · " + ctxTone.label : "") +
+          (selModel && baseModel && !selMatches ? " · 已切换模型" : "")
         : "暂无完成请求");
-      addRow(srcSec, "缓存命中 / 模型", fmtPct(cur.cacheHitRate) + " · " + (cur.model || "—"));
+      addRow(srcSec, "缓存命中 / 模型", fmtPct(cur.cacheHitRate) + " · " + (ctxModel || cur.model || "—"));
       addRow(srcSec, "会话速率", "最近加权 " + fmtTps(r0.tps) + " · 峰值 " + fmtTps(r0.peak) +
         " tok/s · " + rateTone(r0.tps).label);
       if (cur.turnRate) {
@@ -641,20 +755,42 @@
     ui.sep2.style.display = hasSession ? "" : "none";
 
     var ctxVal = mine ? (mine.context || 0) : ((cur && cur.context) || 0);
-    var ctxModel = mine ? mine.model : (cur && cur.model);
-    var ctxWin = contextWindowFor(ctxModel);
+    var baseModel = mine ? mine.model : (cur && cur.model);
+    var selModel = (selectedModel && selectedModel.modelId) || "";
+    var selProvider = selectedModel ? (selectedModel.providerId || "") : "";
+    var selMatches = !!(selModel && baseModel &&
+      selModel.toLowerCase() === String(baseModel).toLowerCase());
+    var useSessionWindow = !selModel || selMatches;
+    var ctxModel = selModel || baseModel;
+    var ctxHint = useSessionWindow ? (mine ? mine.contextWindow : (cur && cur.contextWindow)) : 0;
+    var ctxWin = contextWindowFor(ctxModel, ctxHint, selModel ? selProvider : "",
+      contextWindowsFor(view, isRemote));
+    var ctxSrc = useSessionWindow
+      ? (mine ? mine.contextWindowSource : (cur && cur.contextWindowSource))
+      : (ctxWin ? "model-selection" : "");
     var ctxRawPct = (ctxWin && ctxVal) ? ctxVal * 100.0 / ctxWin : null;
     var ctxRawR = (ctxRawPct == null) ? null : Math.round(ctxRawPct);
     var ct = contextTone(ctxRawR);   // 颜色按实际占用率分级，避免 45% 仍显示绿色
     if (hasSession) {
+      var srcLabels = {
+        "zcode-rules": "你的模型配置",
+        "zcode-config": "ZCode 模型目录",
+        "model-selection": "你的模型配置",
+        "plugin-config": "插件 config 覆盖",
+        "default": "插件默认值"
+      };
       var ctxTip = ["上下文长度",
         "当前会话最近一次完成请求的输入 token 数（含缓存读），也是下一轮请求的基础上下文。",
         "当前 " + (ctxVal ? fmtTok(ctxVal) + " tok" : "暂无完成请求") +
           (ctxWin ? " / " + fmtTok(ctxWin) + "（" + ctxRawR + "%）" : "") +
           (ctxModel ? " · 模型 " + ctxModel : ""),
-        ctxWin ? "占用等级（颜色分级）：" + ct.label : "未匹配到模型窗口，仅显示绝对值。",
-        "数字与颜色分级都按实际占用率计算。",
+        ctxWin ? "占用等级（颜色分级）：" + ct.label : "未找到该模型的上下文窗口配置，仅显示绝对值。",
+        ctxWin ? "窗口取自" + (srcLabels[ctxSrc] || "ZCode 模型目录") + "；数字与颜色都按实际占用率计算。"
+               : "可在 ZCode 的模型配置里设置上下文长度，或在本插件 config 的 context_windows 覆盖。",
         "会话压缩后会自动回落；显示 — 表示还没有完成的请求。"].filter(function (x) { return x; });
+      if (selModel && baseModel && !selMatches) {
+        ctxTip.push("已切换到 " + ctxModel + "，窗口已按新模型更新；上下文用量仍来自最近一次完成请求，发送后会重新统计。");
+      }
       if (ctxWin) {
         ctxTip.push(tierLegend(CONTEXT_TIERS, ct.label, "颜色分级（实际占用率）"));
       }
@@ -858,6 +994,8 @@
         STATS.lower++;
         if (r.top > bestTop) { best = e; bestTop = r.top; }
       }
+      if (best) activeComposer = best;
+      refreshSelectedModel();
       if (!best) return;
       /* 单窗口单条策略：只保留锚在当前 composer 上的实例，其余原地销毁。
        * 原地 splice 保证 window.__tokmonInstances 引用始终有效（热更新清理用）。 */
@@ -877,8 +1015,12 @@
     } catch (e) { STATS.err = String(e && e.message || e); }
   }
 
+  refreshSelectedModel();
   tick();
   window.__tokmonCoordTimer = setInterval(tick, 600);
+  /* 菜单选择/点击后立刻检查，不等 600ms 轮询 */
+  document.addEventListener("click", function () { setTimeout(refreshSelectedModel, 60); }, true);
+  document.addEventListener("keydown", function () { setTimeout(refreshSelectedModel, 60); }, true);
   window.__tokmonWinHide = function () { hideTip(); };
   window.addEventListener("scroll", window.__tokmonWinHide, true);
   window.addEventListener("resize", window.__tokmonWinHide);
@@ -887,10 +1029,12 @@
   window.__tokmonUpdate = function (p) {
     payload = p;
     STATS.payload = p ? Date.now() : 0;
+    refreshSelectedModel();
     for (var i = 0; i < instances.length; i++) instances[i].render();
   };
   window.__tokmonSetSid = function (sid) {
     activeSid = sid || "";
+    refreshSelectedModel();
     for (var i = 0; i < instances.length; i++) instances[i].render();
   };
   window.__tokmonInstances = instances;

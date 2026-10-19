@@ -25,7 +25,7 @@ Tokmon（**Tok**en **Mon**itor）把 ZCode 的 token 消耗和生成速度变成
 
 - **实时速率**：⚡ tok/s，按当前会话精确取值；生成中脉冲提示；缓存命中率直接反映输入复用情况。
 - **会话累计**：💬 当前会话累计 token（不含子代理，子代理是独立会话）。
-- **上下文长度**：⏱ 最近一次完成请求的输入 token（含缓存读），即下一轮的基础上下文；自动读取 ZCode 模型目录显示 `已用 / 窗口 · 实际百分比`；数字和颜色都按实际占用率计算，按 5 档预警。
+- **上下文长度**：⏱ 最近一次完成请求的输入 token（含缓存读），即下一轮的基础上下文；窗口取自 **ZCode 模型设置里该模型自己的上下文长度**（模型规则优先、provider 模型目录兜底，按 provider + model 精确匹配），显示 `已用 / 配置窗口 · 实际百分比`；数字和颜色都按实际占用率计算，按 5 档预警。**在当前聊天窗口切换模型后立即按新模型的窗口重算**，不用等下一条请求或新建会话。
 - **模型 / 请求明细**：`/usage models` 按模型聚合请求数、输入/输出/缓存、缓存命中率、平均 TTFT；`/usage recent` 看最近 N 次请求的速率、TTFT、重试、工具调用。
 - **分源今日**：📦 当前会话所在数据源的今日总量（本地或远端主机）。
 - **全部今日**：🌐 本机 + 所有可达 SSH 远程主机的今日合计，远程失败时标黄并提示。
@@ -160,14 +160,14 @@ python3 "$D/cli.py" remote         # 远程报表
 - `auto_discover: true` 会读取 ZCode 的 `~/.zcode/v2/setting.json`，自动发现连过的 SSH 远程工作区（跳过密码型连接）。
 - `targets` 手动目标优先于自动发现；支持跳板机等自定义 `ssh` argv。
 - `python_path` 可指定数据泵使用的 Python 绝对路径（Electron 主进程 PATH 较瘦时有用）。
-- `context_windows` 覆盖模型上下文窗口（按模型 id 子串匹配）；`context_window_default` 是未匹配时的默认窗口（0 = 使用 ZCode 模型目录的默认值）。
+- `context_windows` 可覆盖模型上下文窗口（按模型 id 子串匹配，优先级高于 ZCode 模型配置）；`context_window_default` 是模型配置里找不到时使用的默认窗口（0 = 不回退）。
 
 完整示例见 [`config.example.json`](config.example.json)。
 
 ## 数据口径
 
 - **速率** = `output_tokens ÷ 生成时长`；有思考段（`reasoning_tokens>0`）或 Claude 系模型从 `started_at` 起算，否则从 `first_token_at` 起算；窗口守卫 200ms～1h；最近 5 条有效样本加权。
-- **上下文长度** = 最近一次完成请求的 `input_tokens`（含缓存读），即下一轮的基础上下文；百分比窗口自动读取 ZCode `provider_config.json` / 内置模型目录，用户配置可覆盖。
+- **上下文长度** = 最近一次完成请求的 `input_tokens`（含缓存读），即下一轮的基础上下文；窗口优先读取 ZCode 模型设置中该模型自己的上下文长度（`provider_config.json` 模型规则，回退到 `config.json` 的 `limit.context`），按 provider + model 精确匹配；本地和 SSH 远端各自使用本机的模型配置。
 - **上下文占用率**的数字和颜色都按实际占用率计算，不再有起算点偏移。
 - **缓存命中率** = `cache_read / input`；输入本身已含缓存读，所以命中率高通常意味着更低的延迟和成本。
 - **颜色分级**：速率 `<15` 深红、`15~30` 橙红、`30~50` 琥珀、`50~80` 黄绿、`80~150` 翠绿、`>150` 青色；上下文占用 `<30%` 绿、`30~50%` 黄绿、`50~70%` 琥珀、`70~85%` 橙红、`≥85%` 深红。
@@ -232,6 +232,7 @@ node --check plugins/zcode-token-monitor/inject-main.cjs
 
 # 测试
 python3 tests/test_rate.py && python3 tests/test_data.py
+python3 tests/test_config.py && python3 tests/test_model_context.py
 ```
 
 提交流程：fork → 开分支 → 改代码 + 补测试 → PR。欢迎 issue 反馈数据口径、兼容性或新主机场景。
@@ -246,6 +247,8 @@ python3 tests/test_rate.py && python3 tests/test_data.py
 
 ## 版本历史
 
+- **1.1.10** — 当前聊天窗口切换模型后立即按新模型窗口重算上下文百分比，不必等下一条请求或新会话。
+- **1.1.9** — 上下文窗口改为按所选模型的 ZCode 模型配置（provider + model）计算，不再固定 1M；本地与 SSH 远端各读本机配置。
 - **1.1.8** — 上下文颜色改按实际占用率分级，取消 25% 起算；45% 现在显示黄绿，不再是绿色。
 - **1.1.7** — 速率与上下文提示改为色块图例：每档显示颜色块、等级与范围，当前档位高亮；移除文字色名说明。
 - **1.1.6** — 上下文数字改为显示实际占用率；25% 起算仅用于颜色分级。

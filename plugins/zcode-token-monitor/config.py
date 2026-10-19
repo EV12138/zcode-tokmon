@@ -20,6 +20,9 @@ CATALOG_PATHS = [
     os.path.join(os.environ.get("LOCALAPPDATA", ""), "Programs", "ZCode",
                  "resources", "config", "provider", "zcode-builtin.json"),
 ]
+# 模型设置界面里的上下文长度（provider.*.models.*.limit.context）
+USER_MODEL_CONFIG_PATH = os.path.join(
+    os.path.expanduser("~"), ".zcode", "v2", "config.json")
 
 DEFAULTS = {
     "python_path": "",             # 主进程数据泵用的 python3 绝对路径（空 = 用 PATH 里的 python3）
@@ -84,14 +87,33 @@ def save(cfg, path=None):
 # ---------------------------------------------------------------- 上下文窗口
 
 def context_catalog():
-    """从 ZCode 的 provider 模型目录读取上下文窗口。
+    """从 ZCode 配置读取上下文窗口。
 
-    provider_config.json 里的精确 modelId 优先；内置 catalog 的 modelMatch
-    规则按顺序求值（后者覆盖前者，"" .* "" 提供默认值）。
+    模型规则（provider_config.json 的 modelConfigRules）是模型设置界面的当前值，
+    优先；config.json 的 provider 模型目录作为 legacy 兜底；最后是内置 catalog
+    的 modelMatch 规则（"" .* "" 提供默认值）。
     """
     exact = {}
+    legacy_exact = {}
     patterns = []
     default = 0
+    try:
+        with open(USER_MODEL_CONFIG_PATH, "r", encoding="utf-8") as f:
+            user_cfg = json.load(f)
+    except (OSError, ValueError):
+        user_cfg = {}
+    for _pid, provider in ((user_cfg.get("provider") or {}) if isinstance(user_cfg, dict) else {}).items():
+        models = (provider or {}).get("models") if isinstance(provider, dict) else None
+        if not isinstance(models, dict):
+            continue
+        for mid, model in models.items():
+            limit = (model or {}).get("limit") if isinstance(model, dict) else None
+            try:
+                window = int((limit or {}).get("context") or 0)
+            except (TypeError, ValueError):
+                window = 0
+            if window > 0:
+                legacy_exact[str(mid).lower()] = window
     for path in CATALOG_PATHS:
         try:
             with open(path, "r", encoding="utf-8") as f:
@@ -99,7 +121,7 @@ def context_catalog():
         except (OSError, ValueError):
             continue
         rules = ((data.get("config") or {}).get("modelConfigRules") or {})
-        for bucket in ("providerModelRules", "modelRules"):
+        for bucket in ("providerModelRules", "manualProviderModelRules", "modelRules"):
             for rule in rules.get(bucket) or []:
                 if not isinstance(rule, dict):
                     continue
@@ -118,6 +140,8 @@ def context_catalog():
                     patterns.append((str(pattern), window))
                     if pattern == ".*":
                         default = window
+    for mid, window in legacy_exact.items():
+        exact.setdefault(mid, window)
     return {"exact": exact, "patterns": patterns, "default": default}
 
 

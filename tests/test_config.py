@@ -1,9 +1,12 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """上下文窗口解析单测（不依赖本机 ZCode 模型目录）。"""
+import json
 import os
 import sys
+import tempfile
 import unittest
+from unittest import mock
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "plugins", "zcode-token-monitor"))
 import config  # noqa: E402
@@ -43,6 +46,26 @@ class ContextWindowTest(unittest.TestCase):
 
     def test_empty_model(self):
         self.assertEqual(config.resolve_context_window("", self.catalog), 0)
+
+
+class CatalogSourceTest(unittest.TestCase):
+    def test_model_rule_beats_legacy_provider_config(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg_path = os.path.join(tmp, "config.json")
+            rules_path = os.path.join(tmp, "provider_config.json")
+            with open(cfg_path, "w", encoding="utf-8") as f:
+                json.dump({"provider": {"p": {"models": {
+                    "deepseek-flash": {"limit": {"context": 1048576}}}}}}, f)
+            with open(rules_path, "w", encoding="utf-8") as f:
+                json.dump({"config": {"modelConfigRules": {"providerModelRules": [
+                    {"providerId": "p", "modelId": "deepseek-flash",
+                     "config": {"properties": {"contextWindow": 300000}}}]}}}, f)
+            with mock.patch.object(config, "USER_MODEL_CONFIG_PATH", cfg_path), \
+                    mock.patch.object(config, "CATALOG_PATHS", [rules_path]):
+                catalog = config.context_catalog()
+                self.assertEqual(catalog["exact"]["deepseek-flash"], 300000)
+                self.assertEqual(
+                    config.resolve_context_window("deepseek-flash", catalog), 300000)
 
 
 if __name__ == "__main__":

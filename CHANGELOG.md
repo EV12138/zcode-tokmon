@@ -2,6 +2,25 @@
 
 All notable changes to Tokmon are documented here.
 
+## 1.1.10 — 2026-10-19
+
+- Switching the model in the current chat immediately recalculates the context
+  percentage against the newly selected model's window.
+- The selected model is read from the composer picker and the persisted model
+  selection; no completed request or new session is needed.
+- Remote sessions use the remote host's own model window table.
+- The tooltip notes that token usage still comes from the last completed
+  request until the next send.
+
+## 1.1.9 — 2026-10-19
+
+- Context window now comes from the selected model's own ZCode configuration
+  (model rules first, then the provider model's `limit.context`), matched by
+  provider + model.
+- Provider rules and the builtin catalog are fallbacks only; a 300k model is no
+  longer displayed or graded against 1M.
+- Local and SSH remote agents each read their own machine's model config.
+
 ## 1.1.8 — 2026-10-18
 
 - Context colors now use the actual usage percentage; the 25% baseline is gone.
