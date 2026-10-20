@@ -25,6 +25,10 @@ jobs:
         run: python tests/test_data.py
       - name: Context config
         run: python tests/test_model_context.py
+      - name: Config and auto repair
+        run: |
+          python tests/test_config.py
+          python tests/test_auto_repair.py
 
   syntax:
     runs-on: ubuntu-latest

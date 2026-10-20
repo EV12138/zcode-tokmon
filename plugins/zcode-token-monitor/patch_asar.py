@@ -3,8 +3,9 @@
 """tokmon app.asar 注入/卸载工具（输入框下方 token 悬浮条）。
 
 用法：
-  python3 patch_asar.py install   # 同步运行时文件到 ~/.zcode/token-monitor/ 并注入（幂等）
-  python3 patch_asar.py remove    # 剥离注入行（不依赖备份，完整还原客户端入口）
+  python3 patch_asar.py install [--no-auto-repair]
+        # 同步运行时文件、注入，并安装 macOS 自修复代理（默认）
+  python3 patch_asar.py remove    # 剥离注入行、卸载自修复代理
   python3 patch_asar.py check     # 只读检查注入状态与运行时文件一致性
 
 原理：asar 主入口 out/main/index.js 尾部追加一行 dynamic import 指向运行时目录的
@@ -32,7 +33,8 @@ HERE = Path(__file__).parent.resolve()
 ENTRY = "out/main/index.js"
 ALIGN = 4
 BLOCK = 4 * 1024 * 1024
-RUNTIME_FILES = ("agent.py", "overlay.js", "inject-main.cjs", "config.py", "remote.py")
+RUNTIME_FILES = ("agent.py", "overlay.js", "inject-main.cjs", "config.py", "remote.py",
+                 "auto_repair.py", "patch_asar.py")
 
 INJECT_LINE_TMPL = (
     '\n;import("{url}").then(()=>null,(e)=>console.error("[tokmon] load failed",e));'
@@ -208,9 +210,29 @@ def runtime_stale():
     return stale
 
 
+# ---------- 自动修复代理 ----------
+
+def _auto_repair(cmd):
+    """调用运行时的 auto_repair.py install/uninstall（macOS）。"""
+    if sys.platform != "darwin":
+        return
+    script = RUNTIME / "auto_repair.py"
+    if not script.is_file():
+        print("ℹ 未找到 auto_repair.py，跳过自动修复代理")
+        return
+    try:
+        r = subprocess.run([sys.executable, str(script), cmd],
+                           capture_output=True, text=True, timeout=60)
+        out = ((r.stdout or "") + (r.stderr or "")).strip()
+        if out:
+            print(out)
+    except Exception as e:  # noqa: BLE001
+        print("ℹ 自动修复代理操作失败（不影响悬浮条）：%s" % e)
+
+
 # ---------- 安装/卸载 ----------
 
-def install():
+def install(no_auto_repair=False):
     print("[install] 目标 %s" % ASAR)
     if not ASAR.is_file():
         print("✗ 找不到 %s（自定义位置请设 ZCODE_ASAR）" % ASAR)
@@ -221,6 +243,10 @@ def install():
     if line in entry:
         print("✓ 已注入（幂等，无需重复）；运行时已在上方同步")
         _self_check(expect=True)
+        if no_auto_repair:
+            print("ℹ 未安装自动修复代理（--no-auto-repair）")
+        else:
+            _auto_repair("install")
         _restart_hint()
         return 0
     entry = INJECT_LINE_RE.sub(b"", entry)      # 幂等：剥掉任何历史 tokmon 行
@@ -236,6 +262,10 @@ def install():
         os.replace(tmp, ASAR)
         return 1
     print("✓ 注入完成")
+    if no_auto_repair:
+        print("ℹ 未安装自动修复代理（--no-auto-repair）")
+    else:
+        _auto_repair("install")
     _restart_hint()
     return 0
 
@@ -248,6 +278,7 @@ def remove():
     entry = entry_bytes(ASAR)
     if not INJECT_LINE_RE.search(entry):
         print("✓ 未注入（无需卸载）")
+        _auto_repair("uninstall")
         return 0
     new_entry = INJECT_LINE_RE.sub(b"", entry)
     tmp = ASAR.with_name(ASAR.name + ".tokmon.tmp")
@@ -256,6 +287,7 @@ def remove():
     os.replace(tmp, ASAR)
     ok = _self_check(expect=False)
     print("✓ 卸载完成" if ok else "✗ 自检异常，请检查")
+    _auto_repair("uninstall")
     _restart_hint()
     return 0 if ok else 1
 
@@ -297,9 +329,10 @@ def _restart_hint():
 
 
 def main(argv=None):
-    cmd = (argv or sys.argv[1:])[0] if (argv or sys.argv[1:]) else ""
+    args = list(argv if argv is not None else sys.argv[1:])
+    cmd = args[0] if args else ""
     if cmd == "install":
-        return install()
+        return install(no_auto_repair="--no-auto-repair" in args)
     if cmd == "remove":
         return remove()
     if cmd == "check":

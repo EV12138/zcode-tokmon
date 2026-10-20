@@ -76,9 +76,10 @@ cd zcode-tokmon
 输入框下方的实时监控栏，包含上面提到的全部数据。安装/卸载是显式命令，不会自动注入：
 
 ```bash
-python3 <插件目录>/patch_asar.py install   # 安装/更新，随后完全退出并重开 ZCode
+python3 <插件目录>/patch_asar.py install   # 注入 + 安装 macOS 自修复代理，随后完全退出并重开 ZCode
+python3 <插件目录>/patch_asar.py install --no-auto-repair  # 只注入，不装代理
 python3 <插件目录>/patch_asar.py check     # 检查注入与运行时一致性
-python3 <插件目录>/patch_asar.py remove    # 卸载；与官方 app.asar 逐字节一致
+python3 <插件目录>/patch_asar.py remove    # 剥离注入并卸载自修复代理
 ```
 
 也可以在会话里用 `/usage-bar install|remove|check`。
@@ -86,8 +87,10 @@ python3 <插件目录>/patch_asar.py remove    # 卸载；与官方 app.asar 逐
 说明：
 
 - 只改 `app.asar` 入口尾部一行 `[tokmon]` 标记的 dynamic import，不备份、不覆盖其它工具注入。
-- ZCode 升级会覆盖 `app.asar`，状态条消失时重跑 `install` 即可。
-- 运行时文件在 `~/.zcode/token-monitor/`，日志在 `inject.log`。
+- **ZCode 更新覆盖 `app.asar` 后，自修复代理会自动重新注入**（macOS）：代理监听 `app.asar`，60 秒内重新注入；如果更新后的 ZCode 已经先启动，且刚启动 5 分钟内、没有正在生成的请求，会自动重启一次让注入生效。
+- 代理连续 3 次/10 分钟仍无法稳定时会熔断并通知，避免更新回滚造成无限重启。
+- 运行时文件在 `~/.zcode/token-monitor/`，日志在 `inject.log`；自修复日志在 `auto-repair.log`。
+- 不想用代理可以在 install 时加 `--no-auto-repair`，或之后跑 `patch_asar.py remove` 卸载；临时停用可把 config 的 `auto_repair` 设为 `false`。
 
 ### 命令
 
@@ -161,6 +164,7 @@ python3 "$D/cli.py" remote         # 远程报表
 - `targets` 手动目标优先于自动发现；支持跳板机等自定义 `ssh` argv。
 - `python_path` 可指定数据泵使用的 Python 绝对路径（Electron 主进程 PATH 较瘦时有用）。
 - `context_windows` 可覆盖模型上下文窗口（按模型 id 子串匹配，优先级高于 ZCode 模型配置）；`context_window_default` 是模型配置里找不到时使用的默认窗口（0 = 不回退）。
+- `auto_repair`（默认 `true`，macOS）控制自修复代理；设为 `false` 后代理只检查、不再重新注入。
 
 完整示例见 [`config.example.json`](config.example.json)。
 
@@ -242,11 +246,13 @@ python3 tests/test_config.py && python3 tests/test_model_context.py
 - **远端数据时有时无**：看 `~/.zcode/token-monitor/inject.log` 是否反复出现 `serve exited`。1.0.0 起 SSH 子进程不再继承数据泵 stdin，正常情况下应只有一次 `serve started`。
 - **远端查询失败**：先跑 `ssh user@host 'echo ok'`，确认免密；失败目标有 60s 负缓存，等一会或重跑即重试。
 - **远端无速率/会话**：远端近 30 分钟没有 ZCode 请求时属正常。
-- **状态条不出现**：跑 `patch_asar.py check`，确认「已注入」且运行时一致；完全退出并重开 ZCode。
+- **状态条不出现**：跑 `patch_asar.py check`，确认「已注入」且运行时一致；完全退出并重开 ZCode。macOS 可跑 `~/.zcode/token-monitor/auto_repair.py status` 看自修复代理是否在运行。
+- **ZCode 更新后状态条消失**：正常情况下自修复代理会自动处理；若没有恢复，看 `auto-repair.log`，或重跑 `patch_asar.py install`。
 - **库结构漂移**：ZCode 升级若改了 `model_usage` 表结构，工具会返回明确错误，更新插件即可。
 
 ## 版本历史
 
+- **1.1.13** — macOS 自修复代理：ZCode 更新覆盖 `app.asar` 后自动重新注入，必要时自动重启一次；`install` 默认安装，`remove` 自动卸载。
 - **1.1.12** — 数据条、悬停提示与明细面板里的所有百分比统一保留一位小数。
 - **1.1.11** — 流式输出滚动时悬停提示保持显示并跟随数据条；移出后重新移入同一项也能再次弹出。
 - **1.1.10** — 当前聊天窗口切换模型后立即按新模型窗口重算上下文百分比，不必等下一条请求或新会话。

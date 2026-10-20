@@ -2,6 +2,17 @@
 
 All notable changes to Tokmon are documented here.
 
+## 1.1.13 — 2026-10-20
+
+- macOS auto-repair agent: `patch_asar.py install` installs a LaunchAgent that
+  watches `app.asar` and re-injects the status bar after ZCode updates.
+- If ZCode was already launched by the updater, the agent restarts it once when
+  it is within 5 minutes of launch and no request is running.
+- `patch_asar.py install --no-auto-repair` opts out; `remove` uninstalls the
+  agent; the `auto_repair` config flag can disable repairs.
+- `auto_repair.py status` shows the agent state; logs go to `auto-repair.log`.
+- Added `tests/test_auto_repair.py` and CI coverage.
+
 ## 1.1.12 — 2026-10-19
 
 - All percentage values in the status bar, hover tooltips and details panel now

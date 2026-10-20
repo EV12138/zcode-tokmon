@@ -28,6 +28,7 @@ DEFAULTS = {
     "python_path": "",             # 主进程数据泵用的 python3 绝对路径（空 = 用 PATH 里的 python3）
     "context_windows": {},         # 模型 -> 上下文窗口覆盖（按模型 id 子串匹配）
     "context_window_default": 0,   # 未匹配时的窗口（0 = 用 ZCode 模型目录默认值）
+    "auto_repair": True,           # macOS：ZCode 更新覆盖 app.asar 后自动重新注入
     "remote": {
         "auto_discover": True,     # 自动读 ~/.zcode/v2/setting.json 的 SSH 工作区记录
         "targets": [],             # 手动目标，见 README；与自动发现按 (user,host,port) 去重，手动优先
