@@ -367,6 +367,16 @@ def q_today(con, now_ms=None):
     return rows[0]
 
 
+def q_today_peak(con, sid, now_ms=None):
+    """当前会话当天（本地零点起）所有完成请求里的最高单条 tok/s。"""
+    s, e = local_day_bounds(now_ms)
+    rows = _rows(con, (
+        "select %s from model_usage where session_id=? and status='completed' "
+        "and completed_at>=? and completed_at<? order by completed_at desc limit 5000"
+    ) % MODEL_RATE_COLS, (sid, s, e))
+    return aggregate_rate(rows)["peak"]
+
+
 def q_days(con, days=7, now_ms=None):
     now = datetime.now() if now_ms is None else datetime.fromtimestamp(now_ms / 1000.0)
     out = []
@@ -497,6 +507,7 @@ def q_session(con, sid, now_ms=None):
         "context": (ctx_row[0]["input_tokens"] if ctx_row else 0),
         "rate": aggregate_rate(latest[:LATEST_N]),
         "lastTps": last_valid_tps(latest),
+        "todayPeak": q_today_peak(con, sid, now_ms),
     }
     if running_row:
         item["runningModel"] = running_row[0]["model_id"]
@@ -558,6 +569,7 @@ def q_current(con, now_ms=None):
         "context": agg["ctx"] or 0,
         "rate": aggregate_rate(latest[:LATEST_N]),
         "turnRate": turn_rate,
+        "todayPeak": q_today_peak(con, sid, now_ms),
     }
 
 

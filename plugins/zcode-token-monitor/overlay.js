@@ -17,6 +17,12 @@
   function cleanup() {
     try { clearInterval(window.__tokmonCoordTimer); } catch (e) { }
     try { clearTimeout(tipTimer); } catch (e) { }
+    try {
+      if (window.__tokmonPointerHandler) {
+        document.removeEventListener("mousemove", window.__tokmonPointerHandler, true);
+        window.__tokmonPointerHandler = null;
+      }
+    } catch (e) { }
     try { hideTip(); } catch (e) { }
     try {
       if (window.__tokmonWinHide) {
@@ -401,6 +407,7 @@
   /* 一个数据组：图标 + 数值 + 单位；opts: tone/pulse/dot/title/click/clickable */
   /* ---------- 悬浮说明卡片 ---------- */
   var tipEl = null, tipTimer = 0, tipTarget = null, tipRaf = 0;
+  var lastPointer = { x: -1, y: -1 };
 
   function ensureTipEl() {
     if (tipEl && tipEl.isConnected) return tipEl;
@@ -479,27 +486,29 @@
     tipTimer = setTimeout(function () { showTip(target, sections); }, 140);
   }
   function bindBarTips(bar) {
-    bar.addEventListener("mouseover", function (e) {
-      var g = e.target && e.target.closest ? e.target.closest(".tokmon-grp") : null;
-      if (!g || !bar.contains(g)) return;
-      /* 提示被滚动隐藏后，重新移入同一组也要能再次弹出 */
-      if (bar.__tipTarget === g && tipEl && tipEl.classList.contains("on")) return;
-      bar.__tipTarget = g;
-      if (g.__tip) scheduleTip(g, g.__tip());
-      else hideTip();
+    /* 组级 mouseenter/mouseleave 在 makeGroup 里绑定；这里只处理点击抑制 */
+    bar.addEventListener("mousedown", function () {
+      bar.__tipSuppressed = true;
+      hideTip();
     });
-    bar.addEventListener("mouseout", function (e) {
-      var g = e.target && e.target.closest ? e.target.closest(".tokmon-grp") : null;
-      if (!g) return;
-      var to = e.relatedTarget;
-      if (to && g.contains(to)) return;
-      if (bar.__tipTarget === g) { bar.__tipTarget = null; hideTip(); }
+    bar.addEventListener("mouseleave", function () {
+      bar.__tipSuppressed = false;
     });
-    bar.addEventListener("mousedown", hideTip);
   }
   function refreshOpenTip(bar) {
     var g = bar.__tipTarget;
     if (g && g.__tip && tipEl && tipEl.classList.contains("on")) showTip(g, g.__tip());
+  }
+  /* 条被 React 重插/重建后，指针不动时 mouseenter 不会重发；按指针位置补一次 */
+  function restoreTipAtPointer(bar) {
+    if (!bar || bar.__tipSuppressed) return;
+    if (lastPointer.x < 0 || lastPointer.y < 0) return;
+    var node = document.elementFromPoint(lastPointer.x, lastPointer.y);
+    var g = node && node.closest ? node.closest(".tokmon-grp") : null;
+    if (!g || !bar.contains(g) || !g.__tip) return;
+    if (bar.__tipTarget === g && tipEl && tipEl.classList.contains("on")) return;
+    bar.__tipTarget = g;
+    scheduleTip(g, g.__tip());
   }
 
   /* ---------- 条内数据组（创建一次，后续只更新数值） ---------- */
@@ -520,6 +529,22 @@
     g.appendChild(ui.val);
     ui.unit = el("span", "tokmon-unit", unitText || "");
     g.appendChild(ui.unit);
+    /* 用 mouseenter/leave（不冒泡、不受子节点文本更新影响）替代 mouseover/out，
+     * 避免任务执行时数字刷新触发 mouseout 把提示关掉。 */
+    g.addEventListener("mouseenter", function () {
+      var bar = g.closest(".tokmon-root");
+      if (!bar || bar.__tipSuppressed) return;
+      if (bar.__tipTarget === g && tipEl && tipEl.classList.contains("on")) return;
+      bar.__tipTarget = g;
+      if (g.__tip) scheduleTip(g, g.__tip());
+      else hideTip();
+    });
+    g.addEventListener("mouseleave", function () {
+      var bar = g.closest(".tokmon-root");
+      if (!bar) return;
+      bar.__tipSuppressed = false;
+      if (bar.__tipTarget === g) { bar.__tipTarget = null; hideTip(); }
+    });
     return ui;
   }
   function setGroup(ui, value, unit, o) {
@@ -646,8 +671,11 @@
           (selModel && baseModel && !selMatches ? " · 已切换模型" : "")
         : "暂无完成请求");
       addRow(srcSec, "缓存命中 / 模型", fmtPct(cur.cacheHitRate) + " · " + (ctxModel || cur.model || "—"));
-      addRow(srcSec, "会话速率", "最近加权 " + fmtTps(r0.tps) + " · 峰值 " + fmtTps(r0.peak) +
+      addRow(srcSec, "会话速率", "最近加权 " + fmtTps(r0.tps) + " · 最近 5 次峰值 " + fmtTps(r0.peak) +
         " tok/s · " + rateTone(r0.tps).label);
+      if (cur.todayPeak > 0) {
+        addRow(srcSec, "今日峰值", fmtTps(cur.todayPeak) + " tok/s（当天最高单条）");
+      }
       if (cur.turnRate) {
         addRow(srcSec, "上一轮", fmtTps(cur.turnRate.tps) + " tok/s（" + fmtTok(cur.turnRate.ratedOutput || 0) + " tok）");
       }
@@ -739,17 +767,26 @@
     if (mine) {
       tps = mine.lastTps || ((mine.rate || {}).tps) || 0;
       rateTip.push("当前会话最近一次有效请求的输出速度：output tokens ÷ 生成时长。");
-      rateTip.push("当前 " + fmtTps(tps) + " t/s · 峰值 " + fmtTps((mine.rate || {}).peak) +
+      rateTip.push("当前 " + fmtTps(tps) + " t/s · 最近 5 次峰值 " + fmtTps((mine.rate || {}).peak) +
         " t/s · " + (mine.requests || 0) + " 次请求");
+      rateTip.push("当前速率取最近一次有效请求；最近 5 次峰值取最近 5 条完成请求中的最高单条。");
+      if (mine.todayPeak > 0) {
+        rateTip.push("今日最高峰值 " + fmtTps(mine.todayPeak) + " t/s（当前会话当天所有完成请求）。");
+      }
       rateTip.push("有思考段的请求从开始生成起算；显示 — 表示暂无有效样本。");
     } else if (delta && delta.requests) {
       tps = delta.tps;
       rateTip.push("未匹配到当前会话，显示全局窗口速率（上次推送后完成的请求）。");
-      rateTip.push("当前 " + fmtTps(tps) + " t/s · 峰值 " + fmtTps(delta.peak) + " t/s · " + delta.requests + " 次完成");
+      rateTip.push("当前 " + fmtTps(tps) + " t/s · 窗口峰值 " + fmtTps(delta.peak) + " t/s · " + delta.requests + " 次完成");
+      rateTip.push("窗口峰值取上次推送后完成请求中的最高单条，不等同于当天峰值。");
     } else if (cur && cur.rate && cur.rate.tps) {
       tps = cur.rate.tps;
       rateTip.push("最近 " + cur.rate.requests + " 次请求的加权速率。");
-      rateTip.push("当前 " + fmtTps(tps) + " t/s · 峰值 " + fmtTps(cur.rate.peak) + " t/s");
+      rateTip.push("当前 " + fmtTps(tps) + " t/s · 最近 5 次峰值 " + fmtTps(cur.rate.peak) + " t/s");
+      rateTip.push("最近 5 次峰值取最近 5 条完成请求中的最高单条。");
+      if (cur.todayPeak > 0) {
+        rateTip.push("今日最高峰值 " + fmtTps(cur.todayPeak) + " t/s（当前会话当天所有完成请求）。");
+      }
     } else {
       rateTip.push("暂无有效样本：请求完成并落库后会显示。");
     }
@@ -947,7 +984,10 @@
         if (mo) mo.disconnect();
         mo = new MutationObserver(function () {
           if (disposed) return;
-          if (bar.parentElement !== card && card.isConnected) card.appendChild(bar);
+          if (bar.parentElement !== card && card.isConnected) {
+            card.appendChild(bar);
+            setTimeout(function () { restoreTipAtPointer(bar); }, 0);
+          }
         });
         mo.observe(card, { childList: true });
       } else {
@@ -973,6 +1013,7 @@
       if (left + bw > window.innerWidth - 8) left = Math.max(8, window.innerWidth - bw - 8);
       bar.style.left = left + "px";
       if (tipEl && tipEl.classList.contains("on") && bar.__tipTarget) repositionTip(bar.__tipTarget);
+      else if (!bar.__tipSuppressed) setTimeout(function () { restoreTipAtPointer(bar); }, 0);
     }
 
     attach();
@@ -981,6 +1022,7 @@
       window.addEventListener("resize", position);
     }
     position();
+    setTimeout(function () { restoreTipAtPointer(bar); }, 0);
 
     return {
       _el: null,
@@ -1045,6 +1087,13 @@
       STATS.inst = instances.length;
     } catch (e) { STATS.err = String(e && e.message || e); }
   }
+
+  function onPointerMove(e) {
+    lastPointer.x = e.clientX;
+    lastPointer.y = e.clientY;
+  }
+  document.addEventListener("mousemove", onPointerMove, true);
+  window.__tokmonPointerHandler = onPointerMove;
 
   refreshSelectedModel();
   tick();

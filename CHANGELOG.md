@@ -2,6 +2,16 @@
 
 All notable changes to Tokmon are documented here.
 
+## 1.1.14 — 2026-10-21
+
+- Rate tooltip now states the peak range: the highest single-request tok/s
+  among the last 5 completed requests; the request count is the session total.
+- Added the current session's today peak (all completed requests since local
+  midnight) to the tooltip and details panel.
+- Hover tooltips are more robust during task execution: per-group
+  mouseenter/mouseleave instead of mouseover/mouseout, and the open tip is
+  restored after the bar is reinserted by React.
+
 ## 1.1.13 — 2026-10-20
 
 - macOS auto-repair agent: `patch_asar.py install` installs a LaunchAgent that
