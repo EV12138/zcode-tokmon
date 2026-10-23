@@ -142,6 +142,9 @@ class DataLayerTest(unittest.TestCase):
         self.assertAlmostEqual(st["rate"]["tps"], round(600 / 14.5, 1))
         # 当天所有完成请求的最高单条：r1 200tok / 4.5s = 44.4（r3 无 first_token 无效）
         self.assertEqual(st["todayPeak"], 44.4)
+        # 当天加权均速：(200+400) / (4.5s+10s) = 41.4
+        self.assertEqual(st["todayTps"], 41.4)
+        self.assertEqual(st["todayRequests"], 3)
 
     def test_last_tps_scans_past_five_invalid_rows(self):
         # 最近 6 条完成请求都缺 first_token_at（不可评分），

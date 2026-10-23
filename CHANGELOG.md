@@ -2,6 +2,14 @@
 
 All notable changes to Tokmon are documented here.
 
+## 1.1.15 — 2026-10-21
+
+- Added the current session's today average speed: weighted average of all
+  completed requests since local midnight (total output / total generation
+  time).
+- Shown alongside the today peak in the rate tooltip and details panel, with
+  the number of completed requests for the day.
+
 ## 1.1.14 — 2026-10-21
 
 - Rate tooltip now states the peak range: the highest single-request tok/s

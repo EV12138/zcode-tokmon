@@ -673,6 +673,9 @@
       addRow(srcSec, "缓存命中 / 模型", fmtPct(cur.cacheHitRate) + " · " + (ctxModel || cur.model || "—"));
       addRow(srcSec, "会话速率", "最近加权 " + fmtTps(r0.tps) + " · 最近 5 次峰值 " + fmtTps(r0.peak) +
         " tok/s · " + rateTone(r0.tps).label);
+      if (cur.todayTps > 0) {
+        addRow(srcSec, "今日均速", fmtTps(cur.todayTps) + " tok/s（当天加权平均）");
+      }
       if (cur.todayPeak > 0) {
         addRow(srcSec, "今日峰值", fmtTps(cur.todayPeak) + " tok/s（当天最高单条）");
       }
@@ -770,8 +773,10 @@
       rateTip.push("当前 " + fmtTps(tps) + " t/s · 最近 5 次峰值 " + fmtTps((mine.rate || {}).peak) +
         " t/s · " + (mine.requests || 0) + " 次请求");
       rateTip.push("当前速率取最近一次有效请求；最近 5 次峰值取最近 5 条完成请求中的最高单条。");
-      if (mine.todayPeak > 0) {
-        rateTip.push("今日最高峰值 " + fmtTps(mine.todayPeak) + " t/s（当前会话当天所有完成请求）。");
+      if (mine.todayTps > 0 || mine.todayPeak > 0) {
+        rateTip.push("今日均速 " + fmtTps(mine.todayTps) + " t/s · 今日峰值 " +
+          fmtTps(mine.todayPeak) + " t/s（当天 " + (mine.todayRequests || 0) + " 次完成）");
+        rateTip.push("今日均速 = 当天所有完成请求的加权平均（总输出 ÷ 总生成时长）；今日峰值取当天最高单条。");
       }
       rateTip.push("有思考段的请求从开始生成起算；显示 — 表示暂无有效样本。");
     } else if (delta && delta.requests) {
@@ -784,8 +789,10 @@
       rateTip.push("最近 " + cur.rate.requests + " 次请求的加权速率。");
       rateTip.push("当前 " + fmtTps(tps) + " t/s · 最近 5 次峰值 " + fmtTps(cur.rate.peak) + " t/s");
       rateTip.push("最近 5 次峰值取最近 5 条完成请求中的最高单条。");
-      if (cur.todayPeak > 0) {
-        rateTip.push("今日最高峰值 " + fmtTps(cur.todayPeak) + " t/s（当前会话当天所有完成请求）。");
+      if (cur.todayTps > 0 || cur.todayPeak > 0) {
+        rateTip.push("今日均速 " + fmtTps(cur.todayTps) + " t/s · 今日峰值 " +
+          fmtTps(cur.todayPeak) + " t/s（当天 " + (cur.todayRequests || 0) + " 次完成）");
+        rateTip.push("今日均速 = 当天所有完成请求的加权平均（总输出 ÷ 总生成时长）；今日峰值取当天最高单条。");
       }
     } else {
       rateTip.push("暂无有效样本：请求完成并落库后会显示。");

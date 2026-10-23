@@ -367,14 +367,20 @@ def q_today(con, now_ms=None):
     return rows[0]
 
 
-def q_today_peak(con, sid, now_ms=None):
-    """当前会话当天（本地零点起）所有完成请求里的最高单条 tok/s。"""
+def q_today_rate(con, sid, now_ms=None):
+    """当前会话当天（本地零点起）完成请求的峰值与加权均速。"""
     s, e = local_day_bounds(now_ms)
     rows = _rows(con, (
         "select %s from model_usage where session_id=? and status='completed' "
         "and completed_at>=? and completed_at<? order by completed_at desc limit 5000"
     ) % MODEL_RATE_COLS, (sid, s, e))
-    return aggregate_rate(rows)["peak"]
+    agg = aggregate_rate(rows)
+    return {
+        "peak": agg["peak"],
+        "tps": agg["tps"],
+        "requests": agg["requests"],
+        "ratedRequests": agg["ratedRequests"],
+    }
 
 
 def q_days(con, days=7, now_ms=None):
@@ -485,6 +491,7 @@ def q_session(con, sid, now_ms=None):
         "select input_tokens, model_id, provider_id from model_usage where session_id=? and status='completed' "
         "and completed_at is not null order by completed_at desc, id desc limit 1"
     ), (sid,))
+    today_rate = q_today_rate(con, sid, now_ms)
     item = {
         "sid": sid,
         "title": (meta[0]["title"] or "")[:40],
@@ -507,7 +514,9 @@ def q_session(con, sid, now_ms=None):
         "context": (ctx_row[0]["input_tokens"] if ctx_row else 0),
         "rate": aggregate_rate(latest[:LATEST_N]),
         "lastTps": last_valid_tps(latest),
-        "todayPeak": q_today_peak(con, sid, now_ms),
+        "todayPeak": today_rate["peak"],
+        "todayTps": today_rate["tps"],
+        "todayRequests": today_rate["requests"],
     }
     if running_row:
         item["runningModel"] = running_row[0]["model_id"]
@@ -554,6 +563,7 @@ def q_current(con, now_ms=None):
         ) % MODEL_RATE_COLS, (sid, last_turn[0]["turn_id"]))
         turn_rate = aggregate_rate(turn_rows)
     meta = _rows(con, "select title, directory from session where id=?", (sid,))
+    today_rate = q_today_rate(con, sid, now_ms)
     return {
         "sid": sid,
         "title": (meta[0]["title"] if meta else "")[:48],
@@ -569,7 +579,9 @@ def q_current(con, now_ms=None):
         "context": agg["ctx"] or 0,
         "rate": aggregate_rate(latest[:LATEST_N]),
         "turnRate": turn_rate,
-        "todayPeak": q_today_peak(con, sid, now_ms),
+        "todayPeak": today_rate["peak"],
+        "todayTps": today_rate["tps"],
+        "todayRequests": today_rate["requests"],
     }
 
 
